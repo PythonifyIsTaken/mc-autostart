@@ -39,6 +39,50 @@ def encode_varint(value):
             break
     return bytes(out)
 
+
+def handle_server_list_ping(client_socket):
+    # Create the JSON response
+    json_response = {
+        "version": {
+            "name": "1.21.1",
+            "protocol": 767
+        },
+        "players": {
+            "max": 0,
+            "online": 0,
+            "sample": [
+                {
+                    "id": "",
+                    "name": ""
+                }
+            ]
+        },
+        "description": {
+            "text": f"Welcome to {server_name}! Join to start the server. Join {discord_invite} for info."
+        }
+    }
+
+    # Convert the JSON object to a string
+    json_str = json.dumps(json_response)
+
+    # Encode the JSON string as bytes
+    json_bytes = json_str.encode('utf-8')
+
+    # Prefix the JSON string with its length (VarInt)
+    json_length = encode_varint(len(json_bytes))
+
+    # Construct the status response packet
+    packet_id = b'\x00'  # Status response packet ID
+    packet_data = json_length + json_bytes  # Length of JSON + JSON string
+
+    # Packet length (VarInt) - total length of the packet, including packet ID and all fields
+    packet_length = encode_varint(len(packet_id) + len(packet_data))
+
+    # Send the entire packet (length + packet ID + data) to the client
+    client_socket.sendall(packet_length + packet_id + packet_data)
+    print("Sent status response to the client.")
+
+
 # create a disconnect packet
 def create_kick_packet(message):
     json_message = json.dumps({"text": message})
@@ -66,7 +110,12 @@ while True:
         packet_length = read_varint(client_socket)
         packet_id = client_socket.recv(1)  # read the packet id (expecting handshake)
 
-        if packet_id == b'\x00':  # handshake packet id
+        remaining_data = client_socket.recv(packet_length - 1)
+        print(f'Packet ID: {packet_id.hex()}')
+        print(f'Packet Data (Hex): {remaining_data.hex()}')
+        print(f'{remaining_data}')
+
+        if 'x02' in str(remaining_data):  # handshake packet id
             # proceed to send a disconnect packet in response
             packet = create_kick_packet(f"Welcome to {server_name}! The server will be available shortly.\nWhile you wait, join {discord_invite}\n(server autostart successful)")
             client_socket.sendall(packet)
@@ -75,6 +124,9 @@ while True:
                 client_socket.close()
                 server_socket.close()
             os.system(f"python3 {__file__}")
+        elif 'x01' in str(remaining_data):
+            print(f'possible server list ping recieved:\n{remaining_data}')
+            handle_server_list_ping(client_socket)
             
         else:
             print("Unexpected packet received")
