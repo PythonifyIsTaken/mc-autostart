@@ -1,6 +1,7 @@
 import socket
 import json
 import os
+import time
 
 def load_config():
     with open('config.json', 'r') as config_file:
@@ -124,6 +125,7 @@ while True:
             if client_socket.fileno() != -1:
                 client_socket.close()
                 server_socket.close()
+                time.sleep(1)
                 os.system(server_start_command)
             os.system(f"python3 {__file__}")
 
@@ -138,6 +140,7 @@ while True:
             if client_socket.fileno() != -1:
                 client_socket.close()
                 server_socket.close()
+            time.sleep(1)
             os.system(server_start_command)
             os.system(f"python3 {__file__}")
             
