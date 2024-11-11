@@ -52,8 +52,8 @@ def handle_server_list_ping(client_socket):
             "online": 0,
             "sample": [
                 {
-                    "id": "",
-                    "name": ""
+                    "id": "1",
+                    "name": "nmcli"
                 }
             ]
         },
@@ -115,18 +115,29 @@ while True:
         print(f'Packet Data (Hex): {remaining_data.hex()}')
         print(f'{remaining_data}')
 
-        if 'x02' in str(remaining_data):  # handshake packet id
+        if 'x02' in str(remaining_data):  # handshake packet type
             # proceed to send a disconnect packet in response
-            packet = create_kick_packet(f"Welcome to {server_name}! The server will be available shortly.\nWhile you wait, join {discord_invite}\n(server autostart successful)")
+            packet = create_kick_packet(f"Welcome to {server_name}! the server will be available shortly.\nWhile you wait, join {discord_invite}\n\n(Join attempt detected)")
             client_socket.sendall(packet)
             os.system(server_start_command)
             if client_socket.fileno() != -1:
                 client_socket.close()
                 server_socket.close()
             os.system(f"python3 {__file__}")
-        elif 'x01' in str(remaining_data):
+
+        elif 'x01' in str(remaining_data): # server ping request packet type
             print(f'possible server list ping recieved:\n{remaining_data}')
             handle_server_list_ping(client_socket)
+
+        elif 'x03' in str(remaining_data):
+            print(f'possible transfer packet detected')
+            packet = create_kick_packet(f'Welcome to {server_name}! The server will be available shortly.\nWhile you wait, join {discord_invite}\n\n(Transfer packet detected)')
+            client_socket.sendall(packet)
+            os.system(server_start_command)
+            if client_socket.fileno() != -1:
+                client_socket.close()
+                server_socket.close()
+            os.system(f"python3 {__file__}")
             
         else:
             print("Unexpected packet received")
