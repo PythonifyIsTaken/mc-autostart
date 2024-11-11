@@ -119,10 +119,10 @@ while True:
             # proceed to send a disconnect packet in response
             packet = create_kick_packet(f"Welcome to {server_name}! the server will be available shortly.\nWhile you wait, join {discord_invite}\n\n(Join attempt detected)")
             client_socket.sendall(packet)
-            os.system(server_start_command)
             if client_socket.fileno() != -1:
                 client_socket.close()
                 server_socket.close()
+                os.system(server_start_command)
             os.system(f"python3 {__file__}")
 
         elif 'x01' in str(remaining_data): # server ping request packet type
@@ -133,10 +133,10 @@ while True:
             print(f'possible transfer packet detected')
             packet = create_kick_packet(f'Welcome to {server_name}! The server will be available shortly.\nWhile you wait, join {discord_invite}\n\n(Transfer packet detected)')
             client_socket.sendall(packet)
-            os.system(server_start_command)
             if client_socket.fileno() != -1:
                 client_socket.close()
                 server_socket.close()
+            os.system(server_start_command)
             os.system(f"python3 {__file__}")
             
         else:
