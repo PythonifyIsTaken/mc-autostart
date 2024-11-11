@@ -7,6 +7,11 @@ def load_config():
         config = json.load(config_file)
     return config
 
+def load_motd():
+    with open('motd.json') as motd_file:
+        motd = json.load(motd_file)
+    return motd
+
 config = load_config()
 server_name = config['server_name']
 server_port = config['server_port']
@@ -61,6 +66,7 @@ def handle_server_list_ping(client_socket):
             "text": f"Welcome to {server_name}! Join to start the server. Join {discord_invite} for info."
         }
     }
+    json_response = load_motd()
 
     # Convert the JSON object to a string
     json_str = json.dumps(json_response)
