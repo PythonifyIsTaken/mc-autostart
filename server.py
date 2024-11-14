@@ -8,13 +8,12 @@ def load_config():
         config = json.load(config_file)
     return config
 
-
-
 config = load_config()
 server_name = config['server_name']
 server_port = config['server_port']
 discord_invite = config['discord_invite']
 server_start_command = config['server_start_command']
+kick_message = config['kick_message']
 
 # read a varint
 def read_varint(sock):
@@ -121,7 +120,7 @@ while True:
 
         if 'x02' in str(remaining_data):  # handshake packet type
             # proceed to send a disconnect packet in response
-            packet = create_kick_packet(f"§6{server_name}§7 is now §astarting§7.\n§a▶ Thanks for joining§7!\n")
+            packet = create_kick_packet(kick_message.format(server_name=server_name, discord_invite=discord_invite))
             client_socket.sendall(packet)
             if client_socket.fileno() != -1:
                 client_socket.close()
@@ -136,7 +135,7 @@ while True:
 
         elif 'x03' in str(remaining_data):
             print(f'possible transfer packet detected')
-            packet = create_kick_packet(f'Welcome to {server_name}! The server will be available shortly.\nWhile you wait, join {discord_invite}\n\n(Transfer packet detected)')
+            packet = create_kick_packet(kick_message)
             client_socket.sendall(packet)
             if client_socket.fileno() != -1:
                 client_socket.close()
