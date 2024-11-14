@@ -61,7 +61,7 @@ def handle_server_list_ping(client_socket):
             ]
         },
         "description": {
-            "text": f"Welcome to {server_name}! Join to start the server. Join {discord_invite} for info."
+            "text": f"§6{server_name} §7is currently §coffline§7.\n§a▶ Join to start the server."
         }
     }
 
@@ -99,6 +99,7 @@ def create_kick_packet(message):
 
 # create a tcp server socket
 server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server_socket.bind(('0.0.0.0', int(server_port)))
 server_socket.listen(5)
 
@@ -120,7 +121,7 @@ while True:
 
         if 'x02' in str(remaining_data):  # handshake packet type
             # proceed to send a disconnect packet in response
-            packet = create_kick_packet(f"Welcome to {server_name}! the server will be available shortly.\nWhile you wait, join {discord_invite}\n\n(Join attempt detected)")
+            packet = create_kick_packet(f"§6{server_name}§7 is now §astarting§7.\n§a▶ Thanks for joining§7!\n")
             client_socket.sendall(packet)
             if client_socket.fileno() != -1:
                 client_socket.close()
