@@ -1,0 +1,20 @@
+{
+    "autostart_port": 26656,
+    "server_start_command": "command to start your server / path to start script",
+    "kick_message": "a message to show on the client when you attempt to join",
+    "offline_motd_message": "a message to display while the server is offline",
+    "starting_motd_message": "a message to display while the server is starting",
+
+    "respect_whitelist": true,
+    "auto_shutdown": true,
+    "start_timeout": 300,
+    "stop_timeout": 150,
+    "minimum_time_online": 600,
+
+    "shutdown_through_sigterm": false,
+    "shutdown_through_rcon": true,
+    "rconcli_path": "path to rcon_cli",
+
+    "sever_name": "your server's name",
+    "discord_invite": "invite to your discord server"
+}
