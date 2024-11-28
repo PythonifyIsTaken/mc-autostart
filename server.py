@@ -101,25 +101,70 @@ def sanity_check(
             raise ValueError("rcon.port or rcon.password have no value")
 
 
-if __name__ == "__main__":
-    logger.info("started mc_autostart")
-    config = load_config()
-    properties = load_properties()
+def start_listening(server_port: str, kick_message: str, server_start_command: str):
+    # create a tcp server socket
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server_socket.bind(("0.0.0.0", int(server_port)))
+    server_socket.listen(5)
 
-    sanity_check(config, properties)
+    logger.info(f"server is listening on port {server_port}...")
 
-    logger.info(
-        f"your clients will need to connect to the mc_autostart port {config["autostart_port"]}"
-    )
+    while True:
+        client_socket, address = server_socket.accept()
+        logger.info(f"connection received from {address}")
 
-### Below is not useable right now
+        try:
+            # read initial packet length
+            packet_length = read_varint(client_socket)
+            packet_id = client_socket.recv(
+                1
+            )  # read the packet id (expecting handshake)
 
-config = load_config()
-server_name = config["server_name"]
-server_port = config["server_port"]
-discord_invite = config["discord_invite"]
-server_start_command = config["server_start_command"]
-kick_message = config["kick_message"]
+            remaining_data = client_socket.recv(packet_length - 1)
+            logger.info(f"Packet ID: {packet_id.hex()}")
+            logger.info(f"Packet Data (Hex): {remaining_data.hex()}")
+            logger.info(f"{remaining_data}")
+
+            if "x02" in str(remaining_data):  # handshake packet type
+                # proceed to send a disconnect packet in response
+                packet = create_kick_packet(
+                    # kick_message.format(
+                    #     server_name=server_name, discord_invite=discord_invite
+                    # )
+                    kick_message
+                )
+                client_socket.sendall(packet)
+                if client_socket.fileno() != -1:
+                    client_socket.close()
+                    server_socket.close()
+                    time.sleep(1)
+                    os.system(server_start_command)
+                os.system(f"python3 {__file__}")
+
+            elif "x01" in str(remaining_data):  # server ping request packet type
+                logger.info(f"possible server list ping recieved:\n{remaining_data}")
+                handle_server_list_ping(client_socket)
+
+            elif "x03" in str(remaining_data):
+                logger.info(f"possible transfer packet detected")
+                packet = create_kick_packet(kick_message)
+                client_socket.sendall(packet)
+                if client_socket.fileno() != -1:
+                    client_socket.close()
+                    server_socket.close()
+                time.sleep(1)
+                os.system(server_start_command)
+                os.system(f"python3 {__file__}")
+
+            else:
+                logger.info("Unexpected packet received")
+
+        except Exception as e:
+            logger.info(f"Error handling connection: {e}")
+
+        client_socket.close()
+        logger.info(f"Connection closed with {address}")
 
 
 # read a varint
@@ -156,7 +201,7 @@ def handle_server_list_ping(client_socket):
         "version": {"name": "1.21.1", "protocol": 767},
         "players": {"max": 0, "online": 0, "sample": [{"id": "1", "name": "nmcli"}]},
         "description": {
-            "text": f"§6{server_name} §7is currently §coffline§7.\n§a▶ Join to start the server."
+            "text": f"§6Server §7is currently §coffline§7.\n§a▶ Join to start the server."
         },
     }
 
@@ -193,63 +238,15 @@ def create_kick_packet(message):
     return packet_length + packet_data
 
 
-# create a tcp server socket
-server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-server_socket.bind(("0.0.0.0", int(server_port)))
-server_socket.listen(5)
+if __name__ == "__main__":
+    logger.info("started mc_autostart")
+    config = load_config()
+    properties = load_properties()
 
-print(f"Minecraft server is listening on port {server_port}...")
+    sanity_check(config, properties)
 
-while True:
-    client_socket, address = server_socket.accept()
-    print(f"Connection received from {address}")
-
-    try:
-        # read initial packet length
-        packet_length = read_varint(client_socket)
-        packet_id = client_socket.recv(1)  # read the packet id (expecting handshake)
-
-        remaining_data = client_socket.recv(packet_length - 1)
-        print(f"Packet ID: {packet_id.hex()}")
-        print(f"Packet Data (Hex): {remaining_data.hex()}")
-        print(f"{remaining_data}")
-
-        if "x02" in str(remaining_data):  # handshake packet type
-            # proceed to send a disconnect packet in response
-            packet = create_kick_packet(
-                kick_message.format(
-                    server_name=server_name, discord_invite=discord_invite
-                )
-            )
-            client_socket.sendall(packet)
-            if client_socket.fileno() != -1:
-                client_socket.close()
-                server_socket.close()
-                time.sleep(1)
-                os.system(server_start_command)
-            os.system(f"python3 {__file__}")
-
-        elif "x01" in str(remaining_data):  # server ping request packet type
-            print(f"possible server list ping recieved:\n{remaining_data}")
-            handle_server_list_ping(client_socket)
-
-        elif "x03" in str(remaining_data):
-            print(f"possible transfer packet detected")
-            packet = create_kick_packet(kick_message)
-            client_socket.sendall(packet)
-            if client_socket.fileno() != -1:
-                client_socket.close()
-                server_socket.close()
-            time.sleep(1)
-            os.system(server_start_command)
-            os.system(f"python3 {__file__}")
-
-        else:
-            print("Unexpected packet received")
-
-    except Exception as e:
-        print(f"Error handling connection: {e}")
-
-    client_socket.close()
-    print(f"Connection closed with {address}")
+    start_listening(
+        server_port=config["autostart_port"],
+        kick_message=config["kick_message"],
+        server_start_command=config["server_start_command"],
+    )
