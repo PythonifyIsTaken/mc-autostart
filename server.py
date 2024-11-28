@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 import logging
 from logging import handlers
-import socket
+import configparser
+from io import StringIO
 import json
+
+import socket
 import os
 import time
 
@@ -21,11 +24,95 @@ logging.basicConfig(
 logger = logging.getLogger()
 
 
-def load_config():
-    with open("config.json", "r") as config_file:
+def load_config() -> dict:
+    """Loads mc_autostart config into a dictionary.
+
+    Returns:
+        dict: config
+    """
+    with open("mc_autostart.json", "r") as config_file:
         config = json.load(config_file)
     return config
 
+
+def load_properties() -> dict:
+    """Loads server.properties into a dictionary.
+
+    Returns:
+        dict: server.properties
+    """
+    with open("server.properties", "r") as properties_file:
+        # to use configparser with eula.txt and server.properties a section must be added
+        # this section is added to the string
+        properties_string = "[Config]\n" + properties_file.read()
+    buf = StringIO(properties_string)
+    config = configparser.ConfigParser()
+    config.read_file(buf)
+    return config._sections["Config"]
+
+
+def sanity_check(
+    config: dict,
+    properties: dict,
+):
+    """Rudimentary check if the given configuration and server.properties can be used.
+
+    Args:
+        config (dict): mc_autostart.json config
+        properties (dict): server.properties config
+
+    Raises:
+        TypeError: port in mc_autostart.json isn't a string
+        Exception: both programms use the same port
+        ValueError: shutdown_through_rcon is enabled in mc_autostart.json but rcon is disabled in server.properties
+        KeyError: if shutdown_through_rcon is enabled but rcon.port or rcon.password are missing from server.properties
+        ValueError: if shutdown_through_rcon is enabled but rcon.port or rcon.password have no value
+    """
+    if not isinstance(config["autostart_port"], str):
+        logger.critical(
+            "stopping mc_autostart! mc_autostart port must be given as a string!"
+        )
+        raise TypeError("mc_autostart port must be given as a string!")
+
+    if config["autostart_port"] == properties["server-port"]:
+        logger.critical(
+            f"stopping mc_autostart! Minecraft Server Port {properties["server-port"]} MUST be different to mc_autostart port {config["autostart_port"]}."
+        )
+        raise Exception("ports must be different!")
+
+    if config["shutdown_through_rcon"] and properties["enable-rcon"].lower() == "false":
+        logger.critical(
+            "stopping mc_autostart! shutdown_through_rcon is enabled, however rcon of minecraft server is disabled! Check server.properties"
+        )
+        raise ValueError(
+            "rcon is enabled in mc_autostart but rcon is disabled in server.properties"
+        )
+
+    if config["shutdown_through_rcon"] and properties["enable-rcon"].lower() == "true":
+        if "rcon.port" not in properties or "rcon.password" not in properties:
+            logger.critical(
+                "stopping mc_autostart! shutdown_through_rcon is enabled, however rcon.port or rcon.password are missing from server.properties"
+            )
+            raise KeyError("rcon.port or rcon.password missing from server.properties")
+        elif properties["rcon.port"] == "" or properties["rcon.password"] == "":
+            logger.critical(
+                "stopping mc_autostart! rcon.port or rcon.password have no values set in server.properties"
+            )
+            raise ValueError("rcon.port or rcon.password have no value")
+
+
+if __name__ == "__main__":
+    logger.info("started mc_autostart")
+    config = load_config()
+    properties = load_properties()
+
+    sanity_check(config, properties)
+
+    logger.info(
+        f"your clients will need to connect to the mc_autostart port {config["autostart_port"]}"
+    )
+
+### Below is not useable right now
 
 config = load_config()
 server_name = config["server_name"]
