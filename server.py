@@ -101,73 +101,6 @@ def sanity_check(
             raise ValueError("rcon.port or rcon.password have no value")
 
 
-def start_listening(server_port: str, kick_message: str, server_start_command: str):
-    # create a tcp server socket
-    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server_socket.bind(("0.0.0.0", int(server_port)))
-    server_socket.listen(5)
-
-    logger.info(f"server is listening on port {server_port}...")
-
-    while True:
-        client_socket, address = server_socket.accept()
-        logger.info(f"connection received from {address}")
-
-        try:
-            # read initial packet length
-            packet_length = read_varint(client_socket)
-            packet_id = client_socket.recv(
-                1
-            )  # read the packet id (expecting handshake)
-
-            remaining_data = client_socket.recv(packet_length - 1)
-            logger.info(f"Packet ID: {packet_id.hex()}")
-            logger.info(f"Packet Data (Hex): {remaining_data.hex()}")
-            logger.info(f"{remaining_data}")
-
-            if "x02" in str(remaining_data):  # handshake packet type
-                # proceed to send a disconnect packet in response
-                packet = create_kick_packet(
-                    # kick_message.format(
-                    #     server_name=server_name, discord_invite=discord_invite
-                    # )
-                    kick_message
-                )
-                client_socket.sendall(packet)
-                if client_socket.fileno() != -1:
-                    client_socket.close()
-                    server_socket.close()
-                    time.sleep(1)
-                    os.system(server_start_command)
-                os.system(f"python3 {__file__}")
-
-            elif "x01" in str(remaining_data):  # server ping request packet type
-                logger.info(f"possible server list ping recieved:\n{remaining_data}")
-                handle_server_list_ping(client_socket)
-
-            elif "x03" in str(remaining_data):
-                logger.info(f"possible transfer packet detected")
-                packet = create_kick_packet(kick_message)
-                client_socket.sendall(packet)
-                if client_socket.fileno() != -1:
-                    client_socket.close()
-                    server_socket.close()
-                time.sleep(1)
-                os.system(server_start_command)
-                os.system(f"python3 {__file__}")
-
-            else:
-                logger.info("Unexpected packet received")
-
-        except Exception as e:
-            logger.info(f"Error handling connection: {e}")
-
-        client_socket.close()
-        logger.info(f"Connection closed with {address}")
-
-
-# read a varint
 def read_varint(sock):
     num = 0
     for i in range(5):  # 5 bytes limit
@@ -179,6 +112,90 @@ def read_varint(sock):
         if not (byte[0] & 0x80):
             break
     return num
+
+
+def start_listening(
+    server_port: str,
+    kick_message: str,
+    server_start_command: str,
+    offline_motd_message: str,
+):
+    # create a tcp server socket
+
+    addr = ("", int(server_port))
+    if socket.has_dualstack_ipv6():
+        dual_stack = True
+        family = socket.AF_INET6
+    else:
+        logger.warning(
+            "your system doesn't support IPv6! mc_autostart will only listen on IPv4."
+        )
+        dual_stack = False
+        family = socket.AF_INET4
+
+    # create_server sets SO_REUSEADDR on POSIX platforms
+    with socket.create_server(
+        (addr), family=family, dualstack_ipv6=dual_stack, reuse_port=False, backlog=5
+    ) as server:
+        while True:
+            conn, addr = server.accept()
+            logger.info(f"server is listening on port {server_port}...")
+
+            try:
+                # TODO: Rework here
+                # read initial packet length
+                packet_length = read_varint(conn)
+
+                packet_id = conn.recv(
+                    1
+                )  # read the packet id (expecting handshake)
+
+                remaining_data = conn.recv(packet_length - 1)
+                logger.info(f"Packet ID: {packet_id.hex()}")
+                logger.info(f"Packet Data (Hex): {remaining_data.hex()}")
+                logger.info(f"{remaining_data}")
+
+                if "x02" in str(remaining_data):  # handshake packet type
+                    # proceed to send a disconnect packet in response
+                    packet = create_kick_packet(
+                        # kick_message.format(
+                        #     server_name=server_name, discord_invite=discord_invite
+                        # )
+                        kick_message
+                    )
+                    conn.sendall(packet)
+                    if conn.fileno() != -1:
+                        conn.close()
+                        server.close()
+                        time.sleep(1)
+                        os.system(server_start_command)
+                    os.system(f"python3 {__file__}")
+
+                elif "x01" in str(remaining_data):  # server ping request packet type
+                    logger.info(
+                        f"possible server list ping recieved:\n{remaining_data}"
+                    )
+                    handle_server_list_ping(conn)
+
+                elif "x03" in str(remaining_data):
+                    logger.info(f"possible transfer packet detected")
+                    packet = create_kick_packet(kick_message)
+                    conn.sendall(packet)
+                    if conn.fileno() != -1:
+                        conn.close()
+                        server.close()
+                    time.sleep(1)
+                    os.system(server_start_command)
+                    os.system(f"python3 {__file__}")
+
+                else:
+                    logger.info("Unexpected packet received")
+
+            except Exception as e:
+                logger.error(f"Error handling connection: {e}")
+
+            conn.close()
+            logger.info(f"Connection closed with {addr}")
 
 
 # encode a varint
@@ -249,4 +266,5 @@ if __name__ == "__main__":
         server_port=config["autostart_port"],
         kick_message=config["kick_message"],
         server_start_command=config["server_start_command"],
+        offline_motd_message=config["offline_motd_message"],
     )
