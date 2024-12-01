@@ -203,9 +203,9 @@ def read_string_bytes(data: bytes) -> tuple[str, int]:
     """
     string_len, i = read_varint_bytes(data)
     try:
-        ret_string = str(data[i:string_len], "utf-8")
+        ret_string = str(data[i:string_len+1], "utf-8")
     except Exception as e:
-        logger.error(f"couldn't parse string '{data[i:string_len]}' - skipping it")
+        logger.error(f"couldn't parse string '{data[i:string_len+1]}' - skipping it")
         ret_string = ""
     return ret_string, string_len + i
 
@@ -217,11 +217,14 @@ def parse_packet(sock: socket) -> tuple[int, int, bytes]:
     Args:
         sock (socket): socket holding the connection
 
+    Raises:
+        ValueError: if a legacy ping is detected
+
     Returns:
         tuple[int, int, bytes]: length, id, data (or empty byte string if no data is available)
     """
     packet_length, len_packet_length = read_varint(sock)
-    if packet_length == 0xfe and len_packet_length == 2:
+    if packet_length == 0xFE and len_packet_length == 2:
         # len_packet_length value of 2 is because of the way varints are parsed
         # https://wiki.vg/Server_List_Ping#1.6
         logger.error("received legacy ping")
@@ -254,6 +257,27 @@ def parse_handshake_data(data: bytes) -> tuple[int, str, int, int]:
     return client_protocol_version, server_address, port_number, next_state
 
 
+def encode_varint(value: int) -> bytes:
+    """encodes an int as a varint
+
+    Args:
+        value (int): value to encode
+
+    Returns:
+        bytes: varint representation of the int as a bytes object
+    """
+    out = bytearray()
+    while True:
+        temp = value & 0x7F
+        value >>= 7
+        if value != 0:
+            temp |= 0x80
+        out.append(temp)
+        if value == 0:
+            break
+    return bytes(out)
+
+
 def handle_server_list_ping(
     sock: socket, offline_motd_message: str, mc_version: str, protocol_version: int
 ):
@@ -264,6 +288,7 @@ def handle_server_list_ping(
         logger.warning(
             f"server ping handshake wasn't followed by correct request - got packet id {packet_id} instead"
         )
+        return
 
     json_response = {
         "version": {"name": mc_version, "protocol": protocol_version},
@@ -271,25 +296,22 @@ def handle_server_list_ping(
         "description": {"text": offline_motd_message},
     }
 
-    # Convert the JSON object to a string
     json_str = json.dumps(json_response)
-
-    # Encode the JSON string as bytes
     json_bytes = json_str.encode("utf-8")
-
-    # Prefix the JSON string with its length (VarInt)
     json_length = encode_varint(len(json_bytes))
 
     # Construct the status response packet
     packet_id = b"\x00"  # Status response packet ID
     packet_data = json_length + json_bytes  # Length of JSON + JSON string
-
     # Packet length (VarInt) - total length of the packet, including packet ID and all fields
     packet_length = encode_varint(len(packet_id) + len(packet_data))
 
     # Send the entire packet (length + packet ID + data) to the client
     sock.sendall(packet_length + packet_id + packet_data)
-    print("Sent status response to the client.")
+    logger.info("sent ping response to the client.")
+
+    # The client may send an additional ping request to determine latency however these are ignored for now
+    # * Add in later version?
 
 
 def start_listening(
@@ -382,20 +404,6 @@ def start_listening(
 
             conn.close()
             logger.info(f"connection closed with {addr}")
-
-
-# encode a varint
-def encode_varint(value):
-    out = bytearray()
-    while True:
-        temp = value & 0x7F
-        value >>= 7
-        if value != 0:
-            temp |= 0x80
-        out.append(temp)
-        if value == 0:
-            break
-    return bytes(out)
 
 
 # create a disconnect packet
