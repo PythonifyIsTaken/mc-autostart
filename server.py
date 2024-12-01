@@ -23,6 +23,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger()
 
+#! GLOBAL CONFIG
+MC_AUTOSTART_CONFIG = {}
+SERVER_PROPERTIES = {}
+WHITELIST = {}
+server_started = False
+
 
 def load_config() -> dict:
     """Loads mc_autostart config into a dictionary.
@@ -110,11 +116,11 @@ def sanity_check(
                 raise ValueError("rcon.port or rcon.password have no value")
 
 
-def read_varint(sock: socket) -> tuple[int, int]:
+def read_varint(conn: socket) -> tuple[int, int]:
     """Read varint data type from connection that is min 1 and max 5 bytes long.
 
     Args:
-        sock (socket): socket holding the connection
+        conn (socket): socket holding the connection
 
     Raises:
         ConnectionError: ConnectionError: If no byte can be read from the connection
@@ -124,7 +130,7 @@ def read_varint(sock: socket) -> tuple[int, int]:
     """
     num = 0
     for i in range(5):  # 5 bytes limit
-        byte = sock.recv(1)
+        byte = conn.recv(1)
         if not byte:
             raise ConnectionError("connection closed by client")
         value = byte[0] & 0x7F
@@ -153,16 +159,16 @@ def read_varint_bytes(data: bytes) -> tuple[int, int]:
     return num, i + 1
 
 
-def read_unsigned_short(sock: socket) -> tuple[int, int]:
+def read_unsigned_short(conn: socket) -> tuple[int, int]:
     """Read unsigned short data type from connection.
 
     Args:
-        sock (socket): socket holding the connection
+        conn (socket): socket holding the connection
 
     Returns:
         tuple[int, int]: received unsigned short, 2 (byte length of unsigned short)
     """
-    byte = sock.recv(2)
+    byte = conn.recv(2)
     return int.from_bytes(byte, byteorder="big", signed=False), 2
 
 
@@ -178,24 +184,24 @@ def read_unsigned_short_bytes(data: bytes) -> tuple[int, int]:
     return int.from_bytes(data[:2], byteorder="big", signed=False), 2
 
 
-def read_string(sock: socket) -> tuple[str, int]:
+def read_string(conn: socket) -> tuple[str, int]:
     """basic read_string function that reads the string size and returns the string.
     DOESN'T CHECK number of UTF-16 code units.
     If the string can't be parsed as UTF-8, the string will be skipped and an empty string will be returned instead.
     The bytes containing the string will be correctly skipped so following operations won't fail.
 
     Args:
-        sock (socket): socket holding the connection
+        conn (socket): socket holding the connection
 
     Returns:
         tuple[str, int]: empty string on error or utf-8 string, number of bytes that where read (string + varint length)
     """
     # string start with varint of length
-    string_len, i = read_varint(sock)
-    byte = sock.recv(string_len)
+    string_len, i = read_varint(conn)
+    byte = conn.recv(string_len)
     try:
         ret_string = str(byte, "utf-8")
-    except Exception as e:
+    except Exception:
         logger.error(f"couldn't parse string '{byte}' - skipping it")
         ret_string = ""
     return ret_string, string_len + i
@@ -219,12 +225,12 @@ def read_string_bytes(data: bytes) -> tuple[str, int]:
     return ret_string, string_len + i
 
 
-def parse_packet(sock: socket) -> tuple[int, int, bytes]:
+def parse_packet(conn: socket) -> tuple[int, int, bytes]:
     """Parse a packet of the minecraft protocol consiting of length, id and data.
     Skipps data if packet only consists of length and id
 
     Args:
-        sock (socket): socket holding the connection
+        conn (socket): socket holding the connection
 
     Raises:
         ValueError: if a legacy ping is detected
@@ -232,32 +238,32 @@ def parse_packet(sock: socket) -> tuple[int, int, bytes]:
     Returns:
         tuple[int, int, bytes]: length, id, data (or empty byte string if no data is available)
     """
-    packet_length, len_packet_length = read_varint(sock)
+    packet_length, len_packet_length = read_varint(conn)
     if packet_length == 0xFE and len_packet_length == 2:
         # len_packet_length value of 2 is because of the way varints are parsed
         # https://wiki.vg/Server_List_Ping#1.6
         logger.error("received legacy ping")
         raise ValueError("not supported operation: legacy ping for version 1.6")
-    packet_id, len_packet_id = read_varint(sock)
+    packet_id, len_packet_id = read_varint(conn)
     if packet_length - len_packet_id == 0:
         data = b""
     else:
-        data = sock.recv(packet_length - len_packet_id)
+        data = conn.recv(packet_length - len_packet_id)
     return packet_length, packet_id, data
 
 
-def get_raw_packet(sock: socket) -> bytes:
+def get_raw_packet(conn: socket) -> bytes:
     """Parse a packet and returs raw bytes object containing packet length, id and data.
 
     Args:
-        sock (socket): socket holding the connection
+        conn (socket): socket holding the connection
 
     Returns:
         bytes: full packet
     """
-    packet_length, len_packet_length = read_varint(sock)
+    packet_length, len_packet_length = read_varint(conn)
     data = int.to_bytes(packet_length, len_packet_length, "big")
-    data += sock.recv(packet_length)
+    data += conn.recv(packet_length)
     return data
 
 
@@ -282,7 +288,7 @@ def parse_handshake_data(data: bytes) -> tuple[int, str, int, int]:
 
 
 def encode_varint(value: int) -> bytes:
-    """encodes an int as a varint
+    """encodes an int as a varint.
 
     Args:
         value (int): value to encode
@@ -302,39 +308,53 @@ def encode_varint(value: int) -> bytes:
     return bytes(out)
 
 
-def handle_server_list_ping(
-    sock: socket,
-    offline_motd_message: str,
-    mc_version: str,
-    protocol_version: int,
-    fake_players=[],
-):
+def create_kick_packet(message: str = None) -> bytes:
+    """creates the kick packet to be send to the client
+
+    Args:
+        message (str, optional): kick message. Defaults to MC_AUTOSTART_CONFIG["kick_message"].
+
+    Returns:
+        bytes: finished packet ready to be send
+    """
+    if message is None:
+        message = MC_AUTOSTART_CONFIG["kick_message"]
+    json_message = json.dumps({"text": message})
+    message_bytes = json_message.encode("utf-8")
+
+    packet_id = b"\x00"  # packet id for login disconnect
+    packet_data = packet_id + encode_varint(len(message_bytes)) + message_bytes
+
+    packet_length = encode_varint(len(packet_data))
+    return packet_length + packet_data
+
+
+def handle_server_list_ping(conn: socket):
     """Handels the server list ping
 
     Args:
-        sock (socket): socket holding the connection
-        offline_motd_message (str): message to display while the server is offline
-        mc_version (str): minecraft version that the server uses
-        protocol_version (int): protocol version of the minecraft version
-        fake_players (list, optional): list of players to display UUIDs MUST be valid or every client ping will be degraded to a legacy ping. Defaults to [].
+        conn (socket): socket holding the connection
     """
     # Awaiting Status Request with id 0x00 or ping request with id 0x01
-    packet_length, packet_id, _ = parse_packet(sock)
+    packet_length, packet_id, _ = parse_packet(conn)
 
     if not packet_id in [0x00, 0x01]:
         logger.warning(
             f"server ping handshake wasn't followed by correct request - got packet id {packet_id} instead"
         )
         return
-
+    fake_players = MC_AUTOSTART_CONFIG["fake_players"]
     json_response = {
-        "version": {"name": mc_version, "protocol": protocol_version},
+        "version": {
+            "name": MC_AUTOSTART_CONFIG["mc_version"],
+            "protocol": MC_AUTOSTART_CONFIG["protocol_version"],
+        },
         "players": {
             "max": len(fake_players) + 1,
             "online": len(fake_players),
             "sample": fake_players,
         },
-        "description": {"text": offline_motd_message},
+        "description": {"text": MC_AUTOSTART_CONFIG["offline_motd_message"]},
     }
 
     json_str = json.dumps(json_response)
@@ -348,41 +368,45 @@ def handle_server_list_ping(
     packet_length = encode_varint(len(packet_id) + len(packet_data))
 
     # Send the entire packet (length + packet ID + data) to the client
-    sock.sendall(packet_length + packet_id + packet_data)
+    conn.sendall(packet_length + packet_id + packet_data)
     logger.info("sending ping response to the client.")
 
     # The client may send an additional ping request to determine latency
     # This packet must be returned as is
-    sock.sendall(get_raw_packet(sock))
+    conn.sendall(get_raw_packet(conn))
 
 
-def handle_player_join(
-    sock: socket, kick_message: str, server_start_command: str, respect_whitelist: bool
-):
+def handle_player_join(conn: socket):
+    """Handels the connection to a joining player, kicks them and executes the server_start_command.
+
+    Args:
+        conn (socket): socket holding the connection
+    """
     # the login start request from the client must be received, or the kick message won't be displayed!
-    packet_length, packet_id, data = parse_packet(sock)
+    _, _, data = parse_packet(conn)
     player_name, _ = read_string_bytes(data)
-    #! Load whitelist in global scope
-    if respect_whitelist:
-        #TODO Check if player_name in whitelist
-        pass
-    packet = create_kick_packet(kick_message)
-    sock.sendall(packet)
-    os.system(server_start_command)
+    logger.info(f"player {player_name} is trying to join the server")
+    if MC_AUTOSTART_CONFIG["respect_whitelist"]:
+        # the login request contains the name of the client, check if this name is on the whitelist
+        # a cracked client or a bot could spoof the name to something on the whitelist
+        # the server could start that way, however the actual minecraft server won't let them join
+        if not any(player["name"] == player_name for player in WHITELIST):
+            logger.info(
+                f"player {player_name} is not on the whitelist - not starting the server"
+            )
+            conn.sendall(create_kick_packet("You are not whitelisted on this server"))
+            return
+
+    conn.sendall(create_kick_packet())
+    logger.info(f"starting server")
+    os.system(MC_AUTOSTART_CONFIG["server_start_command"])
+    global server_started
+    server_started = True
 
 
-def start_listening(
-    server_port: str,
-    kick_message: str,
-    server_start_command: str,
-    offline_motd_message: str,
-    mc_version: str,
-    protocol_version: int,
-    respect_whitelist: bool,
-    fake_players=[],
-):
-    # create a tcp server socket
-    addr = ("", int(server_port))
+def start_listening():
+    """Listen to player connections, handle ping and login request and start server if player joins."""
+    addr = ("", int(MC_AUTOSTART_CONFIG["autostart_port"]))
     if socket.has_dualstack_ipv6():
         dual_stack = True
         family = socket.AF_INET6
@@ -397,17 +421,16 @@ def start_listening(
     with socket.create_server(
         (addr), family=family, dualstack_ipv6=dual_stack, reuse_port=False, backlog=5
     ) as server:
-        logger.info(f"server is listening on port {server_port}...")
+        logger.info(f"server is listening on port {addr[1]}...")
         while True:
-            conn, addr = server.accept()
-            logger.info(f"new connection from {addr}")
+            conn, client_addr = server.accept()
+            logger.info(f"new connection from {client_addr}")
             try:
-
                 # expecting handshake with id 0x00
                 packet_length, packet_id, data = parse_packet(conn)
                 if packet_id != 0x00:
                     logger.warning(
-                        f"expected handshake (0x00) but got packet id {hex(packet_id)}!"
+                        f"expected handshake (0x00) but got packet id {hex(packet_id)} - closing connection!"
                     )
                     conn.close()
                     continue
@@ -416,73 +439,30 @@ def start_listening(
                     parse_handshake_data(data)
                 )
                 logger.info(
-                    f"handshake from {addr} to {server_address}:{port_number} uses protocol version {client_protocol_version} with next state {hex(next_state)}"
+                    f"handshake from {client_addr} to {server_address}:{port_number} uses protocol version {client_protocol_version} with next_state {hex(next_state)}"
                 )
 
                 match next_state:
                     case 0x01:
                         logger.info("server ping received")
-                        handle_server_list_ping(
-                            conn,
-                            offline_motd_message,
-                            mc_version,
-                            protocol_version,
-                            fake_players,
-                        )
+                        handle_server_list_ping(conn)
                     case 0x02:
                         logger.info("login request received")
-                        handle_player_join(
-                            conn, kick_message, server_start_command, respect_whitelist
-                        )
-
+                        handle_player_join(conn)
+                        global server_started
+                        if server_started:
+                            logger.info(f"start command send, stopping mc_autostart")
+                            if conn.fileno() != -1:
+                                conn.close()
+                            break
                     case _:
                         logger.error(f"unknown next state received {hex(next_state)}")
-
-                # if "x02" in str(remaining_data):  # handshake packet type
-                #     # proceed to send a disconnect packet in response
-                #     packet = create_kick_packet(
-                #         # kick_message.format(
-                #         #     server_name=server_name, discord_invite=discord_invite
-                #         # )
-                #         kick_message
-                #     )
-                #     conn.sendall(packet)
-                #     if conn.fileno() != -1:
-                #         conn.close()
-                #         server.close()
-                #         time.sleep(1)
-                #         os.system(server_start_command)
-                #     logger.info("What is this?")
-                #     # os.system(f"python3 {__file__}")
-
-                # elif "x03" in str(remaining_data):
-                #     logger.info(f"possible transfer packet detected")
-                #     packet = create_kick_packet(kick_message)
-                #     conn.sendall(packet)
-                #     if conn.fileno() != -1:
-                #         conn.close()
-                #         server.close()
-                #     time.sleep(1)
-                #     os.system(server_start_command)
-                #     os.system(f"python3 {__file__}")
 
             except Exception as e:
                 logger.critical(f"couldn't handle connection - {e}")
 
             conn.close()
-            logger.info(f"connection closed with {addr}")
-
-
-# create a disconnect packet
-def create_kick_packet(message):
-    json_message = json.dumps({"text": message})
-    message_bytes = json_message.encode("utf-8")
-
-    packet_id = b"\x00"  # packet id for login disconnect
-    packet_data = packet_id + encode_varint(len(message_bytes)) + message_bytes
-
-    packet_length = encode_varint(len(packet_data))
-    return packet_length + packet_data
+            logger.info(f"connection closed with {client_addr}")
 
 
 if __name__ == "__main__":
@@ -492,13 +472,10 @@ if __name__ == "__main__":
 
     sanity_check(config, properties)
 
-    start_listening(
-        server_port=config["autostart_port"],
-        kick_message=config["kick_message"],
-        server_start_command=config["server_start_command"],
-        offline_motd_message=config["offline_motd_message"],
-        mc_version=config["mc_version"],
-        protocol_version=config["protocol_version"],
-        respect_whitelist=config["respect_whitelist"],
-        fake_players=config["fake_players"],
-    )
+    # script didn't crash so config should be safe to use
+    MC_AUTOSTART_CONFIG = config
+    SERVER_PROPERTIES = properties
+    with open("whitelist.json", "r") as whitelist_file:
+        WHITELIST = json.load(whitelist_file)
+
+    start_listening()
