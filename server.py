@@ -117,10 +117,29 @@ def read_varint(sock: socket) -> tuple[int, int]:
     for i in range(5):  # 5 bytes limit
         byte = sock.recv(1)
         if not byte:
-            raise ConnectionError("Connection closed by client")
+            raise ConnectionError("connection closed by client")
         value = byte[0] & 0x7F
         num |= value << (7 * i)
         if not (byte[0] & 0x80):
+            break
+    return num, i + 1
+
+
+def read_varint_bytes(data: bytes) -> tuple[int, int]:
+    """Read varint data type from bytes object.
+
+    Args:
+        data (bytes): bytes object starting with varint
+
+    Returns:
+        tuple[int, int]: varint, byte length of varint
+    """
+    num = 0
+    for i in range(5):  # 5 bytes limit
+        byte = data[i]
+        value = byte & 0x7F
+        num |= value << (7 * i)
+        if not (byte & 0x80):
             break
     return num, i + 1
 
@@ -138,6 +157,18 @@ def read_unsigned_short(sock: socket) -> tuple[int, int]:
     return int.from_bytes(byte, byteorder="big", signed=False), 2
 
 
+def read_unsigned_short_bytes(data: bytes) -> tuple[int, int]:
+    """Like read_unsigned_short but for a bytes object.
+
+    Args:
+        data (bytes): bytes object starting with the unsigned short!
+
+    Returns:
+        tuple[int, int]: unsigned short, 2 (byte length of unsigned short)
+    """
+    return int.from_bytes(data[:2], byteorder="big", signed=False), 2
+
+
 def read_string(sock: socket) -> tuple[str, int]:
     """basic read_string function that reads the string size and returns the string.
     DOESN'T CHECK number of UTF-16 code units.
@@ -148,7 +179,7 @@ def read_string(sock: socket) -> tuple[str, int]:
         sock (socket): socket holding the connection
 
     Returns:
-        tuple[str, int]: empty string on error or utf-8 string, number of bytes that where read
+        tuple[str, int]: empty string on error or utf-8 string, number of bytes that where read (string + varint length)
     """
     # string start with varint of length
     string_len, i = read_varint(sock)
@@ -161,13 +192,75 @@ def read_string(sock: socket) -> tuple[str, int]:
     return ret_string, string_len + i
 
 
-def handle_server_list_ping(sock: socket):
-    # Create the JSON response
+def read_string_bytes(data: bytes) -> tuple[str, int]:
+    """Like read_string but for a bytes object
+
+    Args:
+        data (bytes): data starting with the varint length of the string
+
+    Returns:
+        tuple[str, int]: empty string on error or utf-8 string, number of bytes that where read (string + varint length)
+    """
+    string_len, i = read_varint_bytes(data)
+    try:
+        ret_string = str(data[i:string_len], "utf-8")
+    except Exception as e:
+        logger.error(f"couldn't parse string '{data[i:string_len]}' - skipping it")
+        ret_string = ""
+    return ret_string, string_len + i
+
+
+def parse_packet(sock: socket) -> tuple[int, int, bytes]:
+    """Parse a packet of the minecraft protocol consiting of length, id and data.
+    Skipps data if packet only consists of length and id
+
+    Args:
+        sock (socket): socket holding the connection
+
+    Returns:
+        tuple[int, int, bytes]: length, id, data (or empty byte string if no data is available)
+    """
+    packet_length, _ = read_varint(sock)
+    packet_id, len_packet_id = read_varint(sock)
+    if packet_length - len_packet_id == 0:
+        data = b""
+    else:
+        data = sock.recv(packet_length - len_packet_id)
+    return packet_length, packet_id, data
+
+
+def parse_handshake_data(data: bytes) -> tuple[int, str, int, int]:
+    """Parses a handshake data to it's fields
+
+    Args:
+        data (bytes): bytes object holding data for every handshake field
+
+    Returns:
+        tuple[int, str, int, int]: protocol version, server address, server port, next state
+    """
+    offset = 0
+    client_protocol_version, len_client_protocol_version = read_varint_bytes(data)
+    offset += len_client_protocol_version
+    server_address, len_server_address = read_string_bytes(data[offset:])
+    offset += len_server_address
+    port_number, _ = read_unsigned_short_bytes(data[offset:])
+    offset += 2
+    next_state, _ = read_varint_bytes(data[offset:])
+    return client_protocol_version, server_address, port_number, next_state
+
+
+def handle_server_list_ping(sock: socket, offline_motd_message: str, mc_version: str, protocol_version: int):
+    # Awaiting Status Request with id 0x00 or ping request with id 0x01
+    packet_length, packet_id, _ = parse_packet(sock)
+
+    if not packet_id in [0x00, 0x01]:
+        logger.warning(f"server ping handshake wasn't followed by correct request - got packet id {packet_id} instead")
+
     json_response = {
-        "version": {"name": "1.21.1", "protocol": 767},
-        "players": {"max": 0, "online": 0, "sample": [{"id": "1", "name": "nmcli"}]},
+        "version": {"name": mc_version, "protocol": protocol_version},
+        "players": {"max": 0, "online": 0, "sample": []},
         "description": {
-            "text": f"§6Server §7is currently §coffline§7.\n§a▶ Join to start the server."
+            "text": offline_motd_message
         },
     }
 
@@ -198,7 +291,7 @@ def start_listening(
     server_start_command: str,
     offline_motd_message: str,
     mc_version: str,
-    protocol_version: int
+    protocol_version: int,
 ):
     # create a tcp server socket
     addr = ("", int(server_port))
@@ -221,50 +314,31 @@ def start_listening(
             conn, addr = server.accept()
             logger.info(f"new connection from {addr}")
             try:
-                # read initial packet length
-                packet_length, _ = read_varint(conn)
 
-                # read the packet id (expecting handshake)
-                packet_id, len_packet_id = read_varint(conn)
-                packet_length -= len_packet_id
+                # expecting handshake with id 0x00
+                _, packet_id, data = parse_packet(conn)
                 if packet_id != 0x00:
                     logger.warning(
-                        f"got packet id {hex(packet_id)} which is not supported!"
+                        f"expected handshake (0x00) but got packet id {hex(packet_id)}!"
                     )
                     conn.close()
                     continue
 
-                # read protocol version (see https://wiki.vg/Protocol_version_numbers)
-                client_protocol_version, len_client_protocol_version = read_varint(conn)
-                packet_length -= len_client_protocol_version
-
-                # read server address and port
-                server_address, len_server_address = read_string(conn)
-                port_number, _ = read_unsigned_short(conn)
-                packet_length = packet_length - len_server_address - 2
-
-                # read next state
-                next_state, len_next_state = read_varint(conn)
-                if len_next_state != packet_length:
-                    logger.error(
-                        "actuall packet size doesn't match expected packet size!"
-                    )
-                    conn.close()
-                    continue
-
+                client_protocol_version, server_address, port_number, next_state = (
+                    parse_handshake_data(data)
+                )
                 logger.info(
-                    f"client {addr} uses protocol version {client_protocol_version} and send packet with id {hex(packet_id)} to {server_address}:{port_number} with state {hex(next_state)}"
+                    f"handshake from {addr} to {server_address}:{port_number} uses protocol version {client_protocol_version} with next state {hex(next_state)}"
                 )
 
                 match next_state:
                     case 0x01:
                         logger.info("server ping received")
-                        handle_server_list_ping(conn)
+                        handle_server_list_ping(conn, offline_motd_message, mc_version, protocol_version)
                     case 0x02:
                         logger.info("login request received")
                     case _:
                         logger.error(f"unknown next state received {hex(next_state)}")
-
 
                 # if "x02" in str(remaining_data):  # handshake packet type
                 #     # proceed to send a disconnect packet in response
@@ -315,8 +389,6 @@ def encode_varint(value):
     return bytes(out)
 
 
-
-
 # create a disconnect packet
 def create_kick_packet(message):
     json_message = json.dumps({"text": message})
@@ -342,5 +414,5 @@ if __name__ == "__main__":
         server_start_command=config["server_start_command"],
         offline_motd_message=config["offline_motd_message"],
         mc_version=config["mc_version"],
-        protocol_version=config["protocol_version"]
+        protocol_version=config["protocol_version"],
     )
