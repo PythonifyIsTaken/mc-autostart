@@ -220,7 +220,12 @@ def parse_packet(sock: socket) -> tuple[int, int, bytes]:
     Returns:
         tuple[int, int, bytes]: length, id, data (or empty byte string if no data is available)
     """
-    packet_length, _ = read_varint(sock)
+    packet_length, len_packet_length = read_varint(sock)
+    if packet_length == 0xfe and len_packet_length == 2:
+        # len_packet_length value of 2 is because of the way varints are parsed
+        # https://wiki.vg/Server_List_Ping#1.6
+        logger.error("received legacy ping")
+        raise ValueError("not supported operation: legacy ping for version 1.6")
     packet_id, len_packet_id = read_varint(sock)
     if packet_length - len_packet_id == 0:
         data = b""
@@ -249,19 +254,21 @@ def parse_handshake_data(data: bytes) -> tuple[int, str, int, int]:
     return client_protocol_version, server_address, port_number, next_state
 
 
-def handle_server_list_ping(sock: socket, offline_motd_message: str, mc_version: str, protocol_version: int):
+def handle_server_list_ping(
+    sock: socket, offline_motd_message: str, mc_version: str, protocol_version: int
+):
     # Awaiting Status Request with id 0x00 or ping request with id 0x01
     packet_length, packet_id, _ = parse_packet(sock)
 
     if not packet_id in [0x00, 0x01]:
-        logger.warning(f"server ping handshake wasn't followed by correct request - got packet id {packet_id} instead")
+        logger.warning(
+            f"server ping handshake wasn't followed by correct request - got packet id {packet_id} instead"
+        )
 
     json_response = {
         "version": {"name": mc_version, "protocol": protocol_version},
         "players": {"max": 0, "online": 0, "sample": []},
-        "description": {
-            "text": offline_motd_message
-        },
+        "description": {"text": offline_motd_message},
     }
 
     # Convert the JSON object to a string
@@ -316,7 +323,7 @@ def start_listening(
             try:
 
                 # expecting handshake with id 0x00
-                _, packet_id, data = parse_packet(conn)
+                packet_length, packet_id, data = parse_packet(conn)
                 if packet_id != 0x00:
                     logger.warning(
                         f"expected handshake (0x00) but got packet id {hex(packet_id)}!"
@@ -334,7 +341,9 @@ def start_listening(
                 match next_state:
                     case 0x01:
                         logger.info("server ping received")
-                        handle_server_list_ping(conn, offline_motd_message, mc_version, protocol_version)
+                        handle_server_list_ping(
+                            conn, offline_motd_message, mc_version, protocol_version
+                        )
                     case 0x02:
                         logger.info("login request received")
                     case _:
@@ -369,7 +378,7 @@ def start_listening(
                 #     os.system(f"python3 {__file__}")
 
             except Exception as e:
-                logger.critical(f"couldn't handle connection: {e}")
+                logger.critical(f"couldn't handle connection - {e}")
 
             conn.close()
             logger.info(f"connection closed with {addr}")
