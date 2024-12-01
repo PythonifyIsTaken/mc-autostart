@@ -40,8 +40,9 @@ Basic script to launch your minecraft server when someone tries to join.
         "protocol_version": 763
     }
     ```
-    > [!IMPORTANT]
-    > Place mc_autostart.py and mc_autostart.json in the root directory of your server. The script will pull settings from the server.properties file and the whitelist.
+
+> [!IMPORTANT]
+> Place mc_autostart.py and mc_autostart.json in the root directory of your server. The script will pull settings from the server.properties file and the whitelist.
 
 2. Start the server:
     ### On windows:
