@@ -203,7 +203,7 @@ def read_string_bytes(data: bytes) -> tuple[str, int]:
     """
     string_len, i = read_varint_bytes(data)
     try:
-        ret_string = str(data[i:string_len+1], "utf-8")
+        ret_string = str(data[i : string_len + 1], "utf-8")
     except Exception as e:
         logger.error(f"couldn't parse string '{data[i:string_len+1]}' - skipping it")
         ret_string = ""
@@ -235,6 +235,21 @@ def parse_packet(sock: socket) -> tuple[int, int, bytes]:
     else:
         data = sock.recv(packet_length - len_packet_id)
     return packet_length, packet_id, data
+
+
+def get_raw_packet(sock: socket) -> bytes:
+    """Parse a packet and returs raw bytes object containing packet length, id and data.
+
+    Args:
+        sock (socket): socket holding the connection
+
+    Returns:
+        bytes: full packet
+    """
+    packet_length, len_packet_length = read_varint(sock)
+    data = int.to_bytes(packet_length, len_packet_length, "big")
+    data += sock.recv(packet_length)
+    return data
 
 
 def parse_handshake_data(data: bytes) -> tuple[int, str, int, int]:
@@ -279,7 +294,11 @@ def encode_varint(value: int) -> bytes:
 
 
 def handle_server_list_ping(
-    sock: socket, offline_motd_message: str, mc_version: str, protocol_version: int
+    sock: socket,
+    offline_motd_message: str,
+    mc_version: str,
+    protocol_version: int,
+    fake_players=[],
 ):
     # Awaiting Status Request with id 0x00 or ping request with id 0x01
     packet_length, packet_id, _ = parse_packet(sock)
@@ -292,7 +311,11 @@ def handle_server_list_ping(
 
     json_response = {
         "version": {"name": mc_version, "protocol": protocol_version},
-        "players": {"max": 0, "online": 0, "sample": []},
+        "players": {
+            "max": len(fake_players) + 1,
+            "online": len(fake_players),
+            "sample": fake_players,
+        },
         "description": {"text": offline_motd_message},
     }
 
@@ -310,8 +333,9 @@ def handle_server_list_ping(
     sock.sendall(packet_length + packet_id + packet_data)
     logger.info("sent ping response to the client.")
 
-    # The client may send an additional ping request to determine latency however these are ignored for now
-    # * Add in later version?
+    # The client may send an additional ping request to determine latency
+    # This packet must be returned as is
+    sock.sendall(get_raw_packet(sock))
 
 
 def start_listening(
@@ -321,6 +345,7 @@ def start_listening(
     offline_motd_message: str,
     mc_version: str,
     protocol_version: int,
+    fake_players=[],
 ):
     # create a tcp server socket
     addr = ("", int(server_port))
@@ -364,7 +389,7 @@ def start_listening(
                     case 0x01:
                         logger.info("server ping received")
                         handle_server_list_ping(
-                            conn, offline_motd_message, mc_version, protocol_version
+                            conn, offline_motd_message, mc_version, protocol_version, fake_players
                         )
                     case 0x02:
                         logger.info("login request received")
@@ -432,4 +457,5 @@ if __name__ == "__main__":
         offline_motd_message=config["offline_motd_message"],
         mc_version=config["mc_version"],
         protocol_version=config["protocol_version"],
+        fake_players=config["fake_players"]
     )
