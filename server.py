@@ -80,25 +80,34 @@ def sanity_check(
         )
         raise Exception("ports must be different!")
 
-    if config["shutdown_through_rcon"] and properties["enable-rcon"].lower() == "false":
-        logger.critical(
-            "stopping mc_autostart! shutdown_through_rcon is enabled, however rcon of minecraft server is disabled! Check server.properties"
-        )
-        raise ValueError(
-            "rcon is enabled in mc_autostart but rcon is disabled in server.properties"
-        )
+    if "shutdown_through_rcon" in config:
+        if (
+            config["shutdown_through_rcon"]
+            and properties["enable-rcon"].lower() == "false"
+        ):
+            logger.critical(
+                "stopping mc_autostart! shutdown_through_rcon is enabled, however rcon of minecraft server is disabled! Check server.properties"
+            )
+            raise ValueError(
+                "rcon is enabled in mc_autostart but rcon is disabled in server.properties"
+            )
 
-    if config["shutdown_through_rcon"] and properties["enable-rcon"].lower() == "true":
-        if "rcon.port" not in properties or "rcon.password" not in properties:
-            logger.critical(
-                "stopping mc_autostart! shutdown_through_rcon is enabled, however rcon.port or rcon.password are missing from server.properties"
-            )
-            raise KeyError("rcon.port or rcon.password missing from server.properties")
-        elif properties["rcon.port"] == "" or properties["rcon.password"] == "":
-            logger.critical(
-                "stopping mc_autostart! rcon.port or rcon.password have no values set in server.properties"
-            )
-            raise ValueError("rcon.port or rcon.password have no value")
+        if (
+            config["shutdown_through_rcon"]
+            and properties["enable-rcon"].lower() == "true"
+        ):
+            if "rcon.port" not in properties or "rcon.password" not in properties:
+                logger.critical(
+                    "stopping mc_autostart! shutdown_through_rcon is enabled, however rcon.port or rcon.password are missing from server.properties"
+                )
+                raise KeyError(
+                    "rcon.port or rcon.password missing from server.properties"
+                )
+            elif properties["rcon.port"] == "" or properties["rcon.password"] == "":
+                logger.critical(
+                    "stopping mc_autostart! rcon.port or rcon.password have no values set in server.properties"
+                )
+                raise ValueError("rcon.port or rcon.password have no value")
 
 
 def read_varint(sock: socket) -> tuple[int, int]:
@@ -300,6 +309,15 @@ def handle_server_list_ping(
     protocol_version: int,
     fake_players=[],
 ):
+    """Handels the server list ping
+
+    Args:
+        sock (socket): socket holding the connection
+        offline_motd_message (str): message to display while the server is offline
+        mc_version (str): minecraft version that the server uses
+        protocol_version (int): protocol version of the minecraft version
+        fake_players (list, optional): list of players to display UUIDs MUST be valid or every client ping will be degraded to a legacy ping. Defaults to [].
+    """
     # Awaiting Status Request with id 0x00 or ping request with id 0x01
     packet_length, packet_id, _ = parse_packet(sock)
 
@@ -331,11 +349,26 @@ def handle_server_list_ping(
 
     # Send the entire packet (length + packet ID + data) to the client
     sock.sendall(packet_length + packet_id + packet_data)
-    logger.info("sent ping response to the client.")
+    logger.info("sending ping response to the client.")
 
     # The client may send an additional ping request to determine latency
     # This packet must be returned as is
     sock.sendall(get_raw_packet(sock))
+
+
+def handle_player_join(
+    sock: socket, kick_message: str, server_start_command: str, respect_whitelist: bool
+):
+    # the login start request from the client must be received, or the kick message won't be displayed!
+    packet_length, packet_id, data = parse_packet(sock)
+    player_name, _ = read_string_bytes(data)
+    #! Load whitelist in global scope
+    if respect_whitelist:
+        #TODO Check if player_name in whitelist
+        pass
+    packet = create_kick_packet(kick_message)
+    sock.sendall(packet)
+    os.system(server_start_command)
 
 
 def start_listening(
@@ -345,6 +378,7 @@ def start_listening(
     offline_motd_message: str,
     mc_version: str,
     protocol_version: int,
+    respect_whitelist: bool,
     fake_players=[],
 ):
     # create a tcp server socket
@@ -389,10 +423,18 @@ def start_listening(
                     case 0x01:
                         logger.info("server ping received")
                         handle_server_list_ping(
-                            conn, offline_motd_message, mc_version, protocol_version, fake_players
+                            conn,
+                            offline_motd_message,
+                            mc_version,
+                            protocol_version,
+                            fake_players,
                         )
                     case 0x02:
                         logger.info("login request received")
+                        handle_player_join(
+                            conn, kick_message, server_start_command, respect_whitelist
+                        )
+
                     case _:
                         logger.error(f"unknown next state received {hex(next_state)}")
 
@@ -457,5 +499,6 @@ if __name__ == "__main__":
         offline_motd_message=config["offline_motd_message"],
         mc_version=config["mc_version"],
         protocol_version=config["protocol_version"],
-        fake_players=config["fake_players"]
+        respect_whitelist=config["respect_whitelist"],
+        fake_players=config["fake_players"],
     )
