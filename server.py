@@ -4,10 +4,8 @@ from logging import handlers
 import configparser
 from io import StringIO
 import json
-
 import socket
-import os
-import time
+import subprocess
 
 logging.basicConfig(
     level=logging.INFO,
@@ -80,11 +78,12 @@ def sanity_check(
         )
         raise TypeError("mc_autostart port must be given as a string!")
 
-    if config["autostart_port"] == properties["server-port"]:
-        logger.critical(
-            f"stopping mc_autostart! Minecraft Server Port {properties["server-port"]} MUST be different to mc_autostart port {config["autostart_port"]}."
-        )
-        raise Exception("ports must be different!")
+    #! ignore until proxy function with out shutdown is implemented
+    # if config["autostart_port"] == properties["server-port"]:
+    #     logger.critical(
+    #         f"stopping mc_autostart! Minecraft Server Port {properties["server-port"]} MUST be different to mc_autostart port {config["autostart_port"]}."
+    #     )
+    #     raise Exception("ports must be different!")
 
     if "shutdown_through_rcon" in config:
         if (
@@ -398,8 +397,7 @@ def handle_player_join(conn: socket):
             return
 
     conn.sendall(create_kick_packet())
-    logger.info(f"starting server")
-    os.system(MC_AUTOSTART_CONFIG["server_start_command"])
+    logger.info(f"starting minecraft server...")
     global server_started
     server_started = True
 
@@ -451,7 +449,6 @@ def start_listening():
                         handle_player_join(conn)
                         global server_started
                         if server_started:
-                            logger.info(f"start command send, stopping mc_autostart")
                             if conn.fileno() != -1:
                                 conn.close()
                             break
@@ -463,7 +460,9 @@ def start_listening():
 
             conn.close()
             logger.info(f"connection closed with {client_addr}")
-
+    logger.info("mc_autostart socket closed")
+    p = subprocess.Popen(MC_AUTOSTART_CONFIG["server_start_command"])
+    logger.info(f"start command send, PID of server: {p.pid} - stopping mc_autostart")
 
 if __name__ == "__main__":
     logger.info("started mc_autostart")
@@ -475,7 +474,10 @@ if __name__ == "__main__":
     # script didn't crash so config should be safe to use
     MC_AUTOSTART_CONFIG = config
     SERVER_PROPERTIES = properties
-    with open("whitelist.json", "r") as whitelist_file:
-        WHITELIST = json.load(whitelist_file)
+    try:
+        with open("whitelist.json", "r") as whitelist_file:
+            WHITELIST = json.load(whitelist_file)
+    except FileNotFoundError:
+        logger.error("couldn't find whitelist.json, ignoring it - if respect_whitelist is enabled no user will be able to join!")
 
     start_listening()
