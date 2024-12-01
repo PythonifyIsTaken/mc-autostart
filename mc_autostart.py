@@ -461,7 +461,7 @@ def start_listening():
             conn.close()
             logger.info(f"connection closed with {client_addr}")
     logger.info("mc_autostart socket closed")
-    p = subprocess.Popen(MC_AUTOSTART_CONFIG["server_start_command"])
+    p = subprocess.Popen(MC_AUTOSTART_CONFIG["server_start_command"], shell=True)
     logger.info(f"start command send, PID of server: {p.pid} - stopping mc_autostart")
 
 if __name__ == "__main__":
