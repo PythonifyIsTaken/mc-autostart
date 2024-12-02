@@ -1,0 +1,8 @@
+config.json
+mc_autostart.json
+eula.txt
+server.properties
+whitelist.json
+mc_autostart.log
+test.py
+test_server/*

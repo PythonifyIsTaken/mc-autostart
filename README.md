@@ -1,37 +1,55 @@
-# Automatically start your minecraft server when someone joins  
+# Automatically start your minecraft server when someone joins
 
-This is a lightweight python socket server that listens for connections on the port you set in the configuration file and starts your minecraft server when it detects one.  
+Basic script to launch your minecraft server when someone tries to join.
 
-## Features
-- Very lightweight
-- Easy to configure
-- Very user friendly
-- Very customisable
+## Current Features
+- Supports all client and server versions >= 1.7
 
 ## Planned features
-- Allow more control over the server with lostworld-rewritten
-- Ban blacklisted players and IPs from autostarting the server
+- Autoshutdown via SIGTERM or rcon
 
-## How to use  
-  1. Create your config.json file:  
-```
-{  
-  "sever_name": "your server's name",  
-  "server_start_command": "command to start your server",  
-  "server_port": "your server's port",  
-  "discord_invite": "invite to your discord server",  
-  "kick_message": "a message to show on the client when you attempt to join",  
-  "motd_message": "a message to display to the client on the server list"
-}  
-```
-  2. Start the server:
-     ## On windows:  
-     `py server.py` OR `python server.py`  
-     ## On macOS:
-     `python server.py` OR `python3 server.py`
-     ## On Linux:
-     `python server.py` OR `python3 server.py`
+## How to use
+1. Create your mc_autostart.json file:
+    ```
+    {
+        "autostart_port": "25565",
+        "server_start_command": "command to start your server",
+        "kick_message": "a message to show on the client when you attempt to join",
+        "offline_motd_message": "motd while the server is offline",
+        "fake_players": [
+            {
+                "id": "VALID UUID -> if not valid, ping request won't work",
+                "name": "Name of player to display in the server-list (set fake_players to [] to disable)"
+            },
+        ],
+        "respect_whitelist": true or false,
+        "mc_version": "1.20.1 game version of the server",
+        "protocol_version": 763 (protocol_version of the server)
+    }
+    ```
+    Working example:
+    ```
+    {
+        "autostart_port": "25565",
+        "server_start_command": "java -Xmx1024M -Xms1024M -jar server.jar nogui",
+        "kick_message": "a message to show on the client when you attempt to join",
+        "offline_motd_message": "motd while the server is offline",
+        "fake_players": [],
+        "respect_whitelist": false,
+        "mc_version": "1.20.1",
+        "protocol_version": 763
+    }
+    ```
 
-## Need any help?
-Discord server: https://discord.gg/lostworld
-Discord username: nmcli
+> [!IMPORTANT]
+> Place mc_autostart.py and mc_autostart.json in the root directory of your server. The script will pull settings from the server.properties file and the whitelist.
+
+2. Start the server:
+    ### On windows:
+    `py mc_autostart.py` OR `python mc_autostart.py`
+    ### On macOS:
+    `python mc_autostart.py` OR `python3 mc_autostart.py`
+    #### On Linux:
+    `python mc_autostart.py` OR `python3 mc_autostart.py`
+
+**Need any help?** -> Create an issue
