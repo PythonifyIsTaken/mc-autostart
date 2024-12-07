@@ -8,6 +8,7 @@ import socket
 import subprocess
 import time
 import signal
+import http.client
 
 logging.basicConfig(
     level=logging.INFO,
@@ -49,7 +50,9 @@ def load_properties() -> dict:
     Returns:
         dict: server.properties
     """
-    with open(MC_AUTOSTART_CONFIG["server_dir"] + "server.properties", "r") as properties_file:
+    with open(
+        MC_AUTOSTART_CONFIG["server_dir"] + "server.properties", "r"
+    ) as properties_file:
         # to use configparser with eula.txt and server.properties a section must be added
         # this section is added to the string
         properties_string = "[Config]\n" + properties_file.read()
@@ -67,7 +70,9 @@ def load_whitelist() -> dict:
     """
     whitelist = {}
     try:
-        with open(MC_AUTOSTART_CONFIG["server_dir"] + "whitelist.json", "r") as whitelist_file:
+        with open(
+            MC_AUTOSTART_CONFIG["server_dir"] + "whitelist.json", "r"
+        ) as whitelist_file:
             whitelist = json.load(whitelist_file)
     except FileNotFoundError:
         logger.error(
@@ -122,8 +127,48 @@ def sanity_check():
                         )
                         raise ValueError("rcon.port or rcon.password have no value")
                 if "shutdown_through_sigterm" in MC_AUTOSTART_CONFIG:
-                    if MC_AUTOSTART_CONFIG["shutdown_through_sigterm"] and MC_AUTOSTART_CONFIG["shutdown_through_rcon"]:
-                        logger.warning("shutdown_through_sigterm and shutdown_through_rcon are enabled - using sigterm")
+                    if (
+                        MC_AUTOSTART_CONFIG["shutdown_through_sigterm"]
+                        and MC_AUTOSTART_CONFIG["shutdown_through_rcon"]
+                    ):
+                        logger.warning(
+                            "shutdown_through_sigterm and shutdown_through_rcon are enabled - using sigterm"
+                        )
+    else:
+        MC_AUTOSTART_CONFIG["auto_shutdown"] = False
+
+    if "discord_webhook_notification" in MC_AUTOSTART_CONFIG:
+        if (
+            MC_AUTOSTART_CONFIG["discord_webhook_notification"]
+            and MC_AUTOSTART_CONFIG["discord_webhook_url"] == ""
+        ):
+            logger.error(
+                "discord_webhook_url is empty, won't send wbhook notifications"
+            )
+            MC_AUTOSTART_CONFIG["discord_webhook_notification"] = False
+    else:
+        MC_AUTOSTART_CONFIG["discord_webhook_notification"] = False
+
+
+def send_discord_notification(message: str):
+    """Sends a post request to the discord webbhook. Returns if discord notifications are set to False
+
+    Args:
+        message (str): message to send, if longer then 200 characters, will be shortend.
+    """
+    if MC_AUTOSTART_CONFIG["discord_webhook_notification"] == False:
+        return
+    if len(message) >= 200:
+        message = message[:-6] + "..."
+
+    conn = http.client.HTTPSConnection("www.discord.com")
+    headers = {"Content-type": "application/json"}
+    body = {"content": message, "embeds": []}
+    json_data = json.dumps(body)
+    conn.request("POST", MC_AUTOSTART_CONFIG["discord_webhook_url"], json_data, headers)
+    response = conn.getresponse()
+    logger.info(f"send discord notification with return code: {response.getcode()}")
+
 
 def read_varint(conn: socket) -> tuple[int, int]:
     """Read varint data type from connection that is min 1 and max 5 bytes long.
@@ -407,6 +452,7 @@ def handle_player_join(conn: socket):
             return
 
     conn.sendall(create_kick_packet())
+    send_discord_notification(f"{player_name} started the server")
     logger.info(f"starting minecraft server...")
     global server_started
     server_started = True
@@ -429,6 +475,7 @@ def start_listening():
     with socket.create_server(
         (addr), family=family, dualstack_ipv6=dual_stack, reuse_port=False, backlog=5
     ) as server:
+        send_discord_notification("Server is sleeping and waiting for connections")
         logger.info(f"server is listening on port {addr[1]}...")
         while True:
             conn, client_addr = server.accept()
@@ -471,8 +518,13 @@ def start_listening():
             conn.close()
             logger.info(f"connection closed with {client_addr}")
     logger.info("mc_autostart socket closed")
-    p = subprocess.Popen(MC_AUTOSTART_CONFIG["server_start_command"], shell=True, cwd=MC_AUTOSTART_CONFIG["server_dir"])
+    p = subprocess.Popen(
+        MC_AUTOSTART_CONFIG["server_start_command"],
+        shell=True,
+        cwd=MC_AUTOSTART_CONFIG["server_dir"],
+    )
     return p
+
 
 if __name__ == "__main__":
     logger.info("started mc_autostart")
@@ -484,12 +536,19 @@ if __name__ == "__main__":
     if MC_AUTOSTART_CONFIG["auto_shutdown"]:
         while True:
             server_proccess = start_listening()
-            logger.info(f"server_start_command send, PID of server: {server_proccess.pid} - watching server")
+            logger.info(
+                f"server_start_command send, PID of server: {server_proccess.pid} - watching server"
+            )
 
             if MC_AUTOSTART_CONFIG["shutdown_through_sigterm"]:
                 server_proccess.send_signal(signal.SIGTERM)
             elif MC_AUTOSTART_CONFIG["shutdown_through_rcon"]:
-                pass
+                server_proccess.send_signal(signal.SIGTERM)
     else:
         server_proccess = start_listening()
-        logger.info(f"server_start_command send, PID of server: {server_proccess.pid} - stopping mc_autostart")
+        logger.info(
+            f"server_start_command send, PID of server: {server_proccess.pid} - stopping mc_autostart"
+        )
+        send_discord_notification(
+            "stopping mc_autostart because auto_shutdown is disabled"
+        )
