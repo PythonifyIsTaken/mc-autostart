@@ -6,6 +6,8 @@ from io import StringIO
 import json
 import socket
 import subprocess
+import time
+import signal
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,6 +38,8 @@ def load_config() -> dict:
     """
     with open("mc_autostart.json", "r") as config_file:
         config = json.load(config_file)
+    if config["server_dir"][-1] != "/":
+        config["server_dir"] += "/"
     return config
 
 
@@ -45,7 +49,7 @@ def load_properties() -> dict:
     Returns:
         dict: server.properties
     """
-    with open("server.properties", "r") as properties_file:
+    with open(MC_AUTOSTART_CONFIG["server_dir"] + "server.properties", "r") as properties_file:
         # to use configparser with eula.txt and server.properties a section must be added
         # this section is added to the string
         properties_string = "[Config]\n" + properties_file.read()
@@ -55,65 +59,71 @@ def load_properties() -> dict:
     return config._sections["Config"]
 
 
-def sanity_check(
-    config: dict,
-    properties: dict,
-):
+def load_whitelist() -> dict:
+    """Loads the server whitelist into a dictionary.
+
+    Returns:
+        dict: whitelist - {} if no whitelist was found
+    """
+    whitelist = {}
+    try:
+        with open(MC_AUTOSTART_CONFIG["server_dir"] + "whitelist.json", "r") as whitelist_file:
+            whitelist = json.load(whitelist_file)
+    except FileNotFoundError:
+        logger.error(
+            "couldn't find whitelist.json, ignoring it - if respect_whitelist is enabled no user will be able to join!"
+        )
+    return whitelist
+
+
+def sanity_check():
     """Rudimentary check if the given configuration and server.properties can be used.
 
-    Args:
-        config (dict): mc_autostart.json config
-        properties (dict): server.properties config
-
     Raises:
-        TypeError: port in mc_autostart.json isn't a string
         Exception: both programms use the same port
         ValueError: shutdown_through_rcon is enabled in mc_autostart.json but rcon is disabled in server.properties
         KeyError: if shutdown_through_rcon is enabled but rcon.port or rcon.password are missing from server.properties
         ValueError: if shutdown_through_rcon is enabled but rcon.port or rcon.password have no value
     """
-    if not isinstance(config["autostart_port"], str):
-        logger.critical(
-            "stopping mc_autostart! mc_autostart port must be given as a string!"
-        )
-        raise TypeError("mc_autostart port must be given as a string!")
+    if "auto_shutdown" in MC_AUTOSTART_CONFIG:
+        if MC_AUTOSTART_CONFIG["auto_shutdown"]:
+            if "shutdown_through_rcon" in MC_AUTOSTART_CONFIG:
+                if (
+                    MC_AUTOSTART_CONFIG["shutdown_through_rcon"]
+                    and SERVER_PROPERTIES["enable-rcon"].lower() == "false"
+                ):
+                    logger.critical(
+                        "stopping mc_autostart! shutdown_through_rcon is enabled, however rcon of minecraft server is disabled! Check server.properties"
+                    )
+                    raise ValueError(
+                        "rcon is enabled in mc_autostart but rcon is disabled in server.properties"
+                    )
 
-    #! ignore until proxy function with out shutdown is implemented
-    # if config["autostart_port"] == properties["server-port"]:
-    #     logger.critical(
-    #         f"stopping mc_autostart! Minecraft Server Port {properties["server-port"]} MUST be different to mc_autostart port {config["autostart_port"]}."
-    #     )
-    #     raise Exception("ports must be different!")
-
-    if "shutdown_through_rcon" in config:
-        if (
-            config["shutdown_through_rcon"]
-            and properties["enable-rcon"].lower() == "false"
-        ):
-            logger.critical(
-                "stopping mc_autostart! shutdown_through_rcon is enabled, however rcon of minecraft server is disabled! Check server.properties"
-            )
-            raise ValueError(
-                "rcon is enabled in mc_autostart but rcon is disabled in server.properties"
-            )
-
-        if (
-            config["shutdown_through_rcon"]
-            and properties["enable-rcon"].lower() == "true"
-        ):
-            if "rcon.port" not in properties or "rcon.password" not in properties:
-                logger.critical(
-                    "stopping mc_autostart! shutdown_through_rcon is enabled, however rcon.port or rcon.password are missing from server.properties"
-                )
-                raise KeyError(
-                    "rcon.port or rcon.password missing from server.properties"
-                )
-            elif properties["rcon.port"] == "" or properties["rcon.password"] == "":
-                logger.critical(
-                    "stopping mc_autostart! rcon.port or rcon.password have no values set in server.properties"
-                )
-                raise ValueError("rcon.port or rcon.password have no value")
-
+                if (
+                    MC_AUTOSTART_CONFIG["shutdown_through_rcon"]
+                    and SERVER_PROPERTIES["enable-rcon"].lower() == "true"
+                ):
+                    if (
+                        "rcon.port" not in SERVER_PROPERTIES
+                        or "rcon.password" not in SERVER_PROPERTIES
+                    ):
+                        logger.critical(
+                            "stopping mc_autostart! shutdown_through_rcon is enabled, however rcon.port or rcon.password are missing from server.properties"
+                        )
+                        raise KeyError(
+                            "rcon.port or rcon.password missing from server.properties"
+                        )
+                    elif (
+                        SERVER_PROPERTIES["rcon.port"] == ""
+                        or SERVER_PROPERTIES["rcon.password"] == ""
+                    ):
+                        logger.critical(
+                            "stopping mc_autostart! rcon.port or rcon.password have no values set in server.properties"
+                        )
+                        raise ValueError("rcon.port or rcon.password have no value")
+                if "shutdown_through_sigterm" in MC_AUTOSTART_CONFIG:
+                    if MC_AUTOSTART_CONFIG["shutdown_through_sigterm"] and MC_AUTOSTART_CONFIG["shutdown_through_rcon"]:
+                        logger.warning("shutdown_through_sigterm and shutdown_through_rcon are enabled - using sigterm")
 
 def read_varint(conn: socket) -> tuple[int, int]:
     """Read varint data type from connection that is min 1 and max 5 bytes long.
@@ -404,7 +414,7 @@ def handle_player_join(conn: socket):
 
 def start_listening():
     """Listen to player connections, handle ping and login request and start server if player joins."""
-    addr = ("", int(MC_AUTOSTART_CONFIG["autostart_port"]))
+    addr = ("", int(SERVER_PROPERTIES["server-port"]))
     if socket.has_dualstack_ipv6():
         dual_stack = True
         family = socket.AF_INET6
@@ -461,23 +471,25 @@ def start_listening():
             conn.close()
             logger.info(f"connection closed with {client_addr}")
     logger.info("mc_autostart socket closed")
-    p = subprocess.Popen(MC_AUTOSTART_CONFIG["server_start_command"], shell=True)
-    logger.info(f"start command send, PID of server: {p.pid} - stopping mc_autostart")
+    p = subprocess.Popen(MC_AUTOSTART_CONFIG["server_start_command"], shell=True, cwd=MC_AUTOSTART_CONFIG["server_dir"])
+    return p
 
 if __name__ == "__main__":
     logger.info("started mc_autostart")
-    config = load_config()
-    properties = load_properties()
+    MC_AUTOSTART_CONFIG = load_config()
+    SERVER_PROPERTIES = load_properties()
+    sanity_check()
+    WHITELIST = load_whitelist()
 
-    sanity_check(config, properties)
+    if MC_AUTOSTART_CONFIG["auto_shutdown"]:
+        while True:
+            server_proccess = start_listening()
+            logger.info(f"server_start_command send, PID of server: {server_proccess.pid} - watching server")
 
-    # script didn't crash so config should be safe to use
-    MC_AUTOSTART_CONFIG = config
-    SERVER_PROPERTIES = properties
-    try:
-        with open("whitelist.json", "r") as whitelist_file:
-            WHITELIST = json.load(whitelist_file)
-    except FileNotFoundError:
-        logger.error("couldn't find whitelist.json, ignoring it - if respect_whitelist is enabled no user will be able to join!")
-
-    start_listening()
+            if MC_AUTOSTART_CONFIG["shutdown_through_sigterm"]:
+                server_proccess.send_signal(signal.SIGTERM)
+            elif MC_AUTOSTART_CONFIG["shutdown_through_rcon"]:
+                pass
+    else:
+        server_proccess = start_listening()
+        logger.info(f"server_start_command send, PID of server: {server_proccess.pid} - stopping mc_autostart")
