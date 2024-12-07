@@ -159,7 +159,7 @@ def send_discord_notification(message: str):
     if MC_AUTOSTART_CONFIG["discord_webhook_notification"] == False:
         return
     if len(message) >= 200:
-        message = message[:-6] + "..."
+        message = message[:195] + "..."
 
     conn = http.client.HTTPSConnection("www.discord.com")
     headers = {"Content-type": "application/json"}
