@@ -9,6 +9,7 @@ import subprocess
 import time
 import signal
 import http.client
+import sys
 
 logging.basicConfig(
     level=logging.INFO,
@@ -82,59 +83,8 @@ def load_whitelist() -> dict:
 
 
 def sanity_check():
-    """Rudimentary check if the given configuration and server.properties can be used.
-
-    Raises:
-        Exception: both programms use the same port
-        ValueError: shutdown_through_rcon is enabled in mc_autostart.json but rcon is disabled in server.properties
-        KeyError: if shutdown_through_rcon is enabled but rcon.port or rcon.password are missing from server.properties
-        ValueError: if shutdown_through_rcon is enabled but rcon.port or rcon.password have no value
-    """
-    if "auto_shutdown" in MC_AUTOSTART_CONFIG:
-        if MC_AUTOSTART_CONFIG["auto_shutdown"]:
-            if "shutdown_through_rcon" in MC_AUTOSTART_CONFIG:
-                if (
-                    MC_AUTOSTART_CONFIG["shutdown_through_rcon"]
-                    and SERVER_PROPERTIES["enable-rcon"].lower() == "false"
-                ):
-                    logger.critical(
-                        "stopping mc_autostart! shutdown_through_rcon is enabled, however rcon of minecraft server is disabled! Check server.properties"
-                    )
-                    raise ValueError(
-                        "rcon is enabled in mc_autostart but rcon is disabled in server.properties"
-                    )
-
-                if (
-                    MC_AUTOSTART_CONFIG["shutdown_through_rcon"]
-                    and SERVER_PROPERTIES["enable-rcon"].lower() == "true"
-                ):
-                    if (
-                        "rcon.port" not in SERVER_PROPERTIES
-                        or "rcon.password" not in SERVER_PROPERTIES
-                    ):
-                        logger.critical(
-                            "stopping mc_autostart! shutdown_through_rcon is enabled, however rcon.port or rcon.password are missing from server.properties"
-                        )
-                        raise KeyError(
-                            "rcon.port or rcon.password missing from server.properties"
-                        )
-                    elif (
-                        SERVER_PROPERTIES["rcon.port"] == ""
-                        or SERVER_PROPERTIES["rcon.password"] == ""
-                    ):
-                        logger.critical(
-                            "stopping mc_autostart! rcon.port or rcon.password have no values set in server.properties"
-                        )
-                        raise ValueError("rcon.port or rcon.password have no value")
-                if "shutdown_through_sigterm" in MC_AUTOSTART_CONFIG:
-                    if (
-                        MC_AUTOSTART_CONFIG["shutdown_through_sigterm"]
-                        and MC_AUTOSTART_CONFIG["shutdown_through_rcon"]
-                    ):
-                        logger.warning(
-                            "shutdown_through_sigterm and shutdown_through_rcon are enabled - using sigterm"
-                        )
-    else:
+    """Rudimentary check if the given configuration and server.properties can be used."""
+    if not "auto_shutdown" in MC_AUTOSTART_CONFIG:
         MC_AUTOSTART_CONFIG["auto_shutdown"] = False
 
     if "discord_webhook_notification" in MC_AUTOSTART_CONFIG:
@@ -512,8 +462,13 @@ def handle_player_join(conn: socket):
     server_started = True
 
 
-def start_listening():
-    """Listen to player connections, handle ping and login request and start server if player joins."""
+def start_listening() -> any:
+    """Listen to player connections, handle ping and login request and start server if player joins.
+
+
+    Returns:
+        any: The created subprocess of the server
+    """
     addr = ("", int(SERVER_PROPERTIES["server-port"]))
     if socket.has_dualstack_ipv6():
         dual_stack = True
@@ -577,6 +532,9 @@ def start_listening():
         MC_AUTOSTART_CONFIG["server_start_command"].split(" "),
         shell=False,
         cwd=MC_AUTOSTART_CONFIG["server_dir"],
+        stdin=subprocess.PIPE,
+        text=True,
+        bufsize=0,
     )
     return p
 
@@ -593,10 +551,46 @@ def wait_for_server() -> int:
         mc_status = ping_mc_server()
         if "players" in mc_status:
             return 0
-        time.sleep(10)
         if time.time() - start_time > MC_AUTOSTART_CONFIG["start_timeout"]:
-            break
-    return -1
+            return -1
+        time.sleep(10)
+
+
+def watch_server():
+    """Watches the server for players and returns once the server should be shutdown"""
+    start_time = time.time()
+    last_online_time = 0
+    while True:
+        ping = ping_mc_server()
+        player_number = ping["players"]["online"]
+        if player_number > 0:
+            last_online_time = time.time()
+            logger.info(f"{player_number} players on server, not shuting down")
+        else:
+            current_time = time.time()
+            logger.info(f"no players on server - checking if server should shutdown")
+            if current_time - start_time > MC_AUTOSTART_CONFIG["minimum_time_online"]:
+                # server is allowed to be shutdown
+                if current_time - last_online_time > MC_AUTOSTART_CONFIG["stop_after"]:
+                    logger.info(f"shuting down server")
+                    send_discord_notification(
+                        "No players on server, sending server to sleep"
+                    )
+                    return
+        time.sleep(60)
+
+
+def wait_for_server_shutdown(server_process: any) -> int:
+    """Waits for the shutdown of the server, if the server is still running after stop_timeout.
+
+    Args:
+        server_process (any): the subprocess of the server
+
+    Returns:
+        int: 0 if the server is offline, -1 if the server is still running
+    """
+    
+    return 0
 
 
 if __name__ == "__main__":
@@ -616,29 +610,36 @@ if __name__ == "__main__":
             # Server is starting check if it's available
             status = wait_for_server()
             if status == -1:
-                logger.critical("the server failed to start or exceeded the start_timeout - killing the process and entering sleep mode")
-                send_discord_notification("Minecraft Server exceeded start timeout, going back to sleep")
-                server_proccess.kill()
+                logger.critical(
+                    "the server exceeded the start_timeout - killing the process and entering sleep mode"
+                )
+                send_discord_notification(
+                    "Minecraft Server failed to start, going back to sleep"
+                )
+                # Fuck windows ;(
+                if sys.platform == "win32":
+                    subprocess.call(
+                        ["taskkill", "/F", "/T", "/PID", str(server_proccess.pid)]
+                    )  # No world save
+                else:
+                    # Not tested on mac
+                    server_proccess.kill()
                 time.sleep(2)
                 server_started = False
                 continue
 
             elif status == 0:
                 logger.info("mc server started successfully")
-                send_discord_notification("Minecraft Server is running!")
-
-                if MC_AUTOSTART_CONFIG["shutdown_through_sigterm"]:
-                    server_proccess.terminate()
-                elif MC_AUTOSTART_CONFIG["shutdown_through_rcon"]:
-                    server_proccess.terminate()
-                else:
-                    logger.critical(
-                        "autoshutdown is enabled but sigterm and rcon are disabled - exiting"
-                    )
-                    break
-                time.sleep(5)
+                send_discord_notification("🟢 Minecraft Server is running!")
+                # wait until no more players are on the server
+                watch_server()
+                # server should shutdown wait for it
+                server_proccess.stdin.write(f'stop\n')
+                wait_for_server_shutdown(server_proccess)
             else:
-                logger.critical(f"unknown mc_autostart state - expected status code 0 or -1, got {status}")
+                logger.critical(
+                    f"unknown mc_autostart state - expected status code 0 or -1, got {status}"
+                )
                 raise Exception("Unknown state")
     else:
         server_proccess = start_listening()
