@@ -562,6 +562,13 @@ def watch_server():
     last_online_time = 0
     while True:
         ping = ping_mc_server()
+        if "players" not in ping:
+            # server crashed
+            logger.error("the minecraft server crashed - going back to sleep")
+            send_discord_notification(
+                "⚡ Minecraft Server crashed! Going back to sleep"
+            )
+            return
         player_number = ping["players"]["online"]
         if player_number > 0:
             last_online_time = time.time()
@@ -574,13 +581,13 @@ def watch_server():
                 if current_time - last_online_time > MC_AUTOSTART_CONFIG["stop_after"]:
                     logger.info(f"shuting down server")
                     send_discord_notification(
-                        "No players on server, sending server to sleep"
+                        "🔴 No players on server, sending server to sleep"
                     )
                     return
-        time.sleep(60)
+        time.sleep(30)
 
 
-def wait_for_server_shutdown(server_process: any) -> int:
+def wait_for_server_shutdown() -> int:
     """Waits for the shutdown of the server, if the server is still running after stop_timeout.
 
     Args:
@@ -589,8 +596,29 @@ def wait_for_server_shutdown(server_process: any) -> int:
     Returns:
         int: 0 if the server is offline, -1 if the server is still running
     """
-    
-    return 0
+    shutdown_start = time.time()
+    while True:
+        if server_proccess.poll() is not None:
+            # Server is gone
+            return 0
+        if time.time() - shutdown_start > MC_AUTOSTART_CONFIG["stop_timeout"]:
+            # timeout exceted kill server
+            return -1
+        time.sleep(5)
+
+
+def kill_server(server_process: any):
+    # Fuck windows ;(
+    if sys.platform == "win32":
+        subprocess.call(
+            ["taskkill", "/F", "/T", "/PID", str(server_proccess.pid)]
+        )  # No world save
+    else:
+        # Not tested on mac
+        server_proccess.kill()
+    time.sleep(2)
+    global server_started
+    server_started = False
 
 
 if __name__ == "__main__":
@@ -616,31 +644,35 @@ if __name__ == "__main__":
                 send_discord_notification(
                     "Minecraft Server failed to start, going back to sleep"
                 )
-                # Fuck windows ;(
-                if sys.platform == "win32":
-                    subprocess.call(
-                        ["taskkill", "/F", "/T", "/PID", str(server_proccess.pid)]
-                    )  # No world save
-                else:
-                    # Not tested on mac
-                    server_proccess.kill()
-                time.sleep(2)
-                server_started = False
+                kill_server(server_proccess)
                 continue
 
-            elif status == 0:
+            else:
                 logger.info("mc server started successfully")
                 send_discord_notification("🟢 Minecraft Server is running!")
                 # wait until no more players are on the server
                 watch_server()
                 # server should shutdown wait for it
-                server_proccess.stdin.write(f'stop\n')
-                wait_for_server_shutdown(server_proccess)
-            else:
-                logger.critical(
-                    f"unknown mc_autostart state - expected status code 0 or -1, got {status}"
-                )
-                raise Exception("Unknown state")
+                try:
+                    server_proccess.stdin.write(f"stop\n")
+                    shutdown_status = wait_for_server_shutdown()
+                    if shutdown_status == -1:
+                        logger.error("server failed to shutdown - killing server")
+                        send_discord_notification("server failed to shutdown")
+                        kill_server(server_proccess)
+                    else:
+                        logger.info("server successfully shutdown")
+                except Exception as e:
+                    # if the server crashed the write command can't be executed
+                    logger.error(f"couldn't send stop command - {e}")
+                    shutdown_status = wait_for_server_shutdown()
+                    if shutdown_status != 0:
+                        # why is the process still running???
+                        logger.warning(
+                            "the mc server process is still running - killing it"
+                        )
+                        kill_server(server_proccess)
+
     else:
         server_proccess = start_listening()
         logger.info(
