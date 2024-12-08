@@ -272,9 +272,9 @@ def read_string_bytes(data: bytes) -> tuple[str, int]:
     """
     string_len, i = read_varint_bytes(data)
     try:
-        ret_string = str(data[i : string_len + 1], "utf-8")
+        ret_string = str(data[i : i + string_len], "utf-8")
     except Exception as e:
-        logger.error(f"couldn't parse string '{data[i:string_len+1]}' - skipping it")
+        logger.error(f"couldn't parse string '{data[i:i + string_len]}' - skipping it")
         ret_string = ""
     return ret_string, string_len + i
 
@@ -362,6 +362,30 @@ def encode_varint(value: int) -> bytes:
     return bytes(out)
 
 
+def encode_unsigned_short(value: int) -> bytes:
+    """encoded an int as a unsigned short
+
+    Args:
+        value (int): value to encode
+
+    Returns:
+        bytes: bytes object of the short
+    """
+    return int.to_bytes(value, 2, "big", signed=False)
+
+
+def add_length_field(data: bytes) -> bytes:
+    """Adds the length field in front of the bytes object, useful for encoded strings and finished packets
+
+    Args:
+        data (bytes): data to add the length field to
+
+    Returns:
+        bytes: data starting with the length of the data as a varint
+    """
+    return encode_varint(len(data)) + data
+
+
 def create_kick_packet(message: str = None) -> bytes:
     """creates the kick packet to be send to the client
 
@@ -381,6 +405,36 @@ def create_kick_packet(message: str = None) -> bytes:
 
     packet_length = encode_varint(len(packet_data))
     return packet_length + packet_data
+
+
+def ping_mc_server() -> dict:
+    """Ping the local mc server to check if it's online
+
+    Returns:
+        dict: {} if the server isn't available or the ping response if it's available
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as conn:
+        conn.settimeout(5)
+        try:
+            conn.connect(("localhost", int(SERVER_PROPERTIES["server-port"])))
+            # Handshake: Packet ID 0x00 - Protocol Version 0x00 - host - port - next_state 0x01
+            conn.send(
+                add_length_field(
+                    b"\x00\x00"
+                    + add_length_field("localhost".encode("utf8"))
+                    + encode_unsigned_short(int(SERVER_PROPERTIES["server-port"]))
+                    + b"\x01"
+                )
+            )
+            # Ping Request 0x00
+            conn.send(add_length_field(b"\x00"))
+            # Read response
+            _, _, packet_data = parse_packet(conn)
+            response, _ = read_string_bytes(packet_data)
+        except Exception as e:
+            logger.error(f"mc server unavailable, ping failed - {e}")
+            response = "{}"
+    return json.loads(response)
 
 
 def handle_server_list_ping(conn: socket):
@@ -452,7 +506,7 @@ def handle_player_join(conn: socket):
             return
 
     conn.sendall(create_kick_packet())
-    send_discord_notification(f"{player_name} started the server")
+    send_discord_notification(f"Player {player_name} is waking up the server")
     logger.info(f"starting minecraft server...")
     global server_started
     server_started = True
@@ -479,10 +533,11 @@ def start_listening():
         logger.info(f"server is listening on port {addr[1]}...")
         while True:
             conn, client_addr = server.accept()
+            conn.settimeout(10)
             logger.info(f"new connection from {client_addr}")
             try:
                 # expecting handshake with id 0x00
-                packet_length, packet_id, data = parse_packet(conn)
+                _, packet_id, data = parse_packet(conn)
                 if packet_id != 0x00:
                     logger.warning(
                         f"expected handshake (0x00) but got packet id {hex(packet_id)} - closing connection!"
@@ -519,11 +574,29 @@ def start_listening():
             logger.info(f"connection closed with {client_addr}")
     logger.info("mc_autostart socket closed")
     p = subprocess.Popen(
-        MC_AUTOSTART_CONFIG["server_start_command"],
-        shell=True,
+        MC_AUTOSTART_CONFIG["server_start_command"].split(" "),
+        shell=False,
         cwd=MC_AUTOSTART_CONFIG["server_dir"],
     )
     return p
+
+
+def wait_for_server() -> int:
+    """Waits for the server to start, if the server is to slow (isn't available after start_timeout seconds) the server process is killed
+
+    Returns:
+        int: 0 on success, -1 if the timeout is exceeded
+    """
+    start_time = time.time()
+    while True:
+        # ping the server every ten seconds and check if the timeout is over / the server is available
+        mc_status = ping_mc_server()
+        if "players" in mc_status:
+            return 0
+        time.sleep(10)
+        if time.time() - start_time > MC_AUTOSTART_CONFIG["start_timeout"]:
+            break
+    return -1
 
 
 if __name__ == "__main__":
@@ -540,10 +613,33 @@ if __name__ == "__main__":
                 f"server_start_command send, PID of server: {server_proccess.pid} - watching server"
             )
 
-            if MC_AUTOSTART_CONFIG["shutdown_through_sigterm"]:
-                server_proccess.send_signal(signal.SIGTERM)
-            elif MC_AUTOSTART_CONFIG["shutdown_through_rcon"]:
-                server_proccess.send_signal(signal.SIGTERM)
+            # Server is starting check if it's available
+            status = wait_for_server()
+            if status == -1:
+                logger.critical("the server failed to start or exceeded the start_timeout - killing the process and entering sleep mode")
+                send_discord_notification("Minecraft Server exceeded start timeout, going back to sleep")
+                server_proccess.kill()
+                time.sleep(2)
+                server_started = False
+                continue
+
+            elif status == 0:
+                logger.info("mc server started successfully")
+                send_discord_notification("Minecraft Server is running!")
+
+                if MC_AUTOSTART_CONFIG["shutdown_through_sigterm"]:
+                    server_proccess.terminate()
+                elif MC_AUTOSTART_CONFIG["shutdown_through_rcon"]:
+                    server_proccess.terminate()
+                else:
+                    logger.critical(
+                        "autoshutdown is enabled but sigterm and rcon are disabled - exiting"
+                    )
+                    break
+                time.sleep(5)
+            else:
+                logger.critical(f"unknown mc_autostart state - expected status code 0 or -1, got {status}")
+                raise Exception("Unknown state")
     else:
         server_proccess = start_listening()
         logger.info(
