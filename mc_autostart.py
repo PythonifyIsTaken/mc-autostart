@@ -98,7 +98,9 @@ def sanity_check():
             MC_AUTOSTART_CONFIG["discord_webhook_notification"] = False
     else:
         MC_AUTOSTART_CONFIG["discord_webhook_notification"] = False
-
+    if "auto_shutdown_via_sigterm" in MC_AUTOSTART_CONFIG:
+        if sys.platform == "win32" and MC_AUTOSTART_CONFIG["auto_shutdown_via_sigterm"]:
+            logger.warning("auto_shutdown_via_sigterm may or may not work")
 
 def send_discord_notification(message: str):
     """Sends a post request to the discord webbhook. Returns if discord notifications are set to False
@@ -246,7 +248,7 @@ def parse_packet(conn: socket) -> tuple[int, int, bytes]:
     if packet_length == 0xFE and len_packet_length == 2:
         # len_packet_length value of 2 is because of the way varints are parsed
         # https://wiki.vg/Server_List_Ping#1.6
-        logger.error("received legacy ping")
+        logger.warning("received legacy ping - ignoring it")
         raise ValueError("not supported operation: legacy ping for version 1.6")
     packet_id, len_packet_id = read_varint(conn)
     if packet_length - len_packet_id == 0:
@@ -382,7 +384,7 @@ def ping_mc_server() -> dict:
             _, _, packet_data = parse_packet(conn)
             response, _ = read_string_bytes(packet_data)
         except Exception as e:
-            logger.error(f"mc server unavailable, ping failed - {e}")
+            logger.warning(f"mc server unavailable, ping failed - {e}")
             response = "{}"
     return json.loads(response)
 
@@ -528,14 +530,21 @@ def start_listening() -> any:
             conn.close()
             logger.info(f"connection closed with {client_addr}")
     logger.info("mc_autostart socket closed")
-    p = subprocess.Popen(
-        MC_AUTOSTART_CONFIG["server_start_command"].split(" "),
-        shell=False,
-        cwd=MC_AUTOSTART_CONFIG["server_dir"],
-        stdin=subprocess.PIPE,
-        text=True,
-        bufsize=0,
-    )
+    try:
+        p = subprocess.Popen(
+            MC_AUTOSTART_CONFIG["server_start_command"].split(" "),
+            shell=False,
+            cwd=MC_AUTOSTART_CONFIG["server_dir"],
+            stdin=subprocess.PIPE,
+            text=True,
+            bufsize=0,
+        )
+    except Exception as e:
+        logger.critical(
+            f"couldn't execute server_start_command {MC_AUTOSTART_CONFIG['server_start_command']} - {e}!"
+        )
+        send_discord_notification(f"Failed to start minecraft server, check your logs!")
+        raise Exception("CAN'T RECOVER SEE LOGS - GOOD BYE")
     return p
 
 
@@ -584,6 +593,7 @@ def watch_server():
                         "🔴 No players on server, sending server to sleep"
                     )
                     return
+            logger.info("no timeout reached - server will stay online")
         time.sleep(30)
 
 
@@ -608,14 +618,25 @@ def wait_for_server_shutdown() -> int:
 
 
 def kill_server(server_process: any):
-    # Fuck windows ;(
     if sys.platform == "win32":
         subprocess.call(
             ["taskkill", "/F", "/T", "/PID", str(server_proccess.pid)]
         )  # No world save
     else:
         # Not tested on mac
-        server_proccess.kill()
+        server_proccess.terminate()
+
+    #! This will mostly happen if a start script is used, because then the stop command can't be written to stdin or is ignored
+    if server_proccess.poll() is None:
+        # server process is still running
+        logger.critical(
+            "the server process is still running, after sending SIGKILL/taskkill"
+        )
+        server_proccess.terminate()
+    if ping_mc_server() != {}:
+        # server is still online
+        logger.critical("the server itself is still running, after SIGKILL/taskkill")
+
     time.sleep(2)
     global server_started
     server_started = False
@@ -654,7 +675,10 @@ if __name__ == "__main__":
                 watch_server()
                 # server should shutdown wait for it
                 try:
-                    server_proccess.stdin.write(f"stop\n")
+                    if MC_AUTOSTART_CONFIG["auto_shutdown_via_sigterm"]:
+                        server_proccess.terminate()
+                    else:
+                        server_proccess.stdin.write(f"stop\n")
                     shutdown_status = wait_for_server_shutdown()
                     if shutdown_status == -1:
                         logger.error("server failed to shutdown - killing server")
@@ -668,8 +692,8 @@ if __name__ == "__main__":
                     shutdown_status = wait_for_server_shutdown()
                     if shutdown_status != 0:
                         # why is the process still running???
-                        logger.warning(
-                            "the mc server process is still running - killing it"
+                        logger.critical(
+                            "the server exceeded the stop_timeout (process is still running) - killing it"
                         )
                         kill_server(server_proccess)
 
