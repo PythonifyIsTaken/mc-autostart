@@ -10,6 +10,7 @@ import time
 import signal
 import http.client
 import sys
+import os
 
 logging.basicConfig(
     level=logging.INFO,
@@ -101,6 +102,7 @@ def sanity_check():
     if "auto_shutdown_via_sigterm" in MC_AUTOSTART_CONFIG:
         if sys.platform == "win32" and MC_AUTOSTART_CONFIG["auto_shutdown_via_sigterm"]:
             logger.warning("auto_shutdown_via_sigterm may or may not work")
+
 
 def send_discord_notification(message: str):
     """Sends a post request to the discord webbhook. Returns if discord notifications are set to False
@@ -538,6 +540,7 @@ def start_listening() -> any:
             stdin=subprocess.PIPE,
             text=True,
             bufsize=0,
+            start_new_session=True,
         )
     except Exception as e:
         logger.critical(
@@ -608,7 +611,7 @@ def wait_for_server_shutdown() -> int:
     """
     shutdown_start = time.time()
     while True:
-        if server_proccess.poll() is not None:
+        if server_process.poll() is not None:
             # Server is gone
             return 0
         if time.time() - shutdown_start > MC_AUTOSTART_CONFIG["stop_timeout"]:
@@ -618,25 +621,28 @@ def wait_for_server_shutdown() -> int:
 
 
 def kill_server(server_process: any):
+    logger.info("force kill stage 1: sending taskkill or sigterm to every child")
     if sys.platform == "win32":
         subprocess.call(
-            ["taskkill", "/F", "/T", "/PID", str(server_proccess.pid)]
+            ["taskkill", "/F", "/T", "/PID", str(server_process.pid)]
         )  # No world save
     else:
         # Not tested on mac
-        server_proccess.terminate()
-
-    #! This will mostly happen if a start script is used, because then the stop command can't be written to stdin or is ignored
-    if server_proccess.poll() is None:
-        # server process is still running
-        logger.critical(
-            "the server process is still running, after sending SIGKILL/taskkill"
-        )
-        server_proccess.terminate()
-    if ping_mc_server() != {}:
-        # server is still online
-        logger.critical("the server itself is still running, after SIGKILL/taskkill")
-
+        os.killpg(os.getpgid(server_process.pid), signal.SIGTERM)  # may save the world
+    logger.info(
+        "force kill stage 2: check if force kill worked (taskkill will be successful, sigterm may not)"
+    )
+    time.sleep(15)
+    if server_process.poll() is None or ping_mc_server() != {}:
+        if sys.platform != "win32":
+            logger.critical(
+                "the server is still running, after sending SIGTERM/taskkill - killing it with SIGKILL"
+            )
+            os.killpg(os.getpgid(server_process.pid), signal.SIGKILL)
+        else:
+            logger.critical("windows failed to kill the server")
+    else:
+        logger.info("the server was killed")
     time.sleep(2)
     global server_started
     server_started = False
@@ -651,9 +657,9 @@ if __name__ == "__main__":
 
     if MC_AUTOSTART_CONFIG["auto_shutdown"]:
         while True:
-            server_proccess = start_listening()
+            server_process = start_listening()
             logger.info(
-                f"server_start_command send, PID of server: {server_proccess.pid} - watching server"
+                f"server_start_command send, PID of server: {server_process.pid} - watching server"
             )
 
             # Server is starting check if it's available
@@ -665,7 +671,7 @@ if __name__ == "__main__":
                 send_discord_notification(
                     "Minecraft Server failed to start, going back to sleep"
                 )
-                kill_server(server_proccess)
+                kill_server(server_process)
                 continue
 
             else:
@@ -674,33 +680,23 @@ if __name__ == "__main__":
                 # wait until no more players are on the server
                 watch_server()
                 # server should shutdown wait for it
-                try:
-                    if MC_AUTOSTART_CONFIG["auto_shutdown_via_sigterm"]:
-                        server_proccess.terminate()
-                    else:
-                        server_proccess.stdin.write(f"stop\n")
-                    shutdown_status = wait_for_server_shutdown()
-                    if shutdown_status == -1:
-                        logger.error("server failed to shutdown - killing server")
-                        send_discord_notification("server failed to shutdown")
-                        kill_server(server_proccess)
-                    else:
-                        logger.info("server successfully shutdown")
-                except Exception as e:
-                    # if the server crashed the write command can't be executed
-                    logger.error(f"couldn't send stop command - {e}")
-                    shutdown_status = wait_for_server_shutdown()
-                    if shutdown_status != 0:
-                        # why is the process still running???
-                        logger.critical(
-                            "the server exceeded the stop_timeout (process is still running) - killing it"
-                        )
-                        kill_server(server_proccess)
+
+                if MC_AUTOSTART_CONFIG["auto_shutdown_via_sigterm"]:
+                    server_process.terminate()
+                else:
+                    server_process.stdin.write(f"stop\n")
+                shutdown_status = wait_for_server_shutdown()
+                if shutdown_status == -1:
+                    logger.error("server failed to shutdown - killing server")
+                    send_discord_notification("server failed to shutdown")
+                    kill_server(server_process)
+                else:
+                    logger.info("server successfully shutdown")
 
     else:
-        server_proccess = start_listening()
+        server_process = start_listening()
         logger.info(
-            f"server_start_command send, PID of server: {server_proccess.pid} - stopping mc_autostart"
+            f"server_start_command send, PID of server: {server_process.pid} - stopping mc_autostart"
         )
         send_discord_notification(
             "stopping mc_autostart because auto_shutdown is disabled"
