@@ -6,6 +6,11 @@ from io import StringIO
 import json
 import socket
 import subprocess
+import time
+import signal
+import http.client
+import sys
+import os
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,6 +41,8 @@ def load_config() -> dict:
     """
     with open("mc_autostart.json", "r") as config_file:
         config = json.load(config_file)
+    if config["server_dir"][-1] != "/":
+        config["server_dir"] += "/"
     return config
 
 
@@ -45,7 +52,9 @@ def load_properties() -> dict:
     Returns:
         dict: server.properties
     """
-    with open("server.properties", "r") as properties_file:
+    with open(
+        MC_AUTOSTART_CONFIG["server_dir"] + "server.properties", "r"
+    ) as properties_file:
         # to use configparser with eula.txt and server.properties a section must be added
         # this section is added to the string
         properties_string = "[Config]\n" + properties_file.read()
@@ -55,64 +64,64 @@ def load_properties() -> dict:
     return config._sections["Config"]
 
 
-def sanity_check(
-    config: dict,
-    properties: dict,
-):
-    """Rudimentary check if the given configuration and server.properties can be used.
+def load_whitelist() -> dict:
+    """Loads the server whitelist into a dictionary.
+
+    Returns:
+        dict: whitelist - {} if no whitelist was found
+    """
+    whitelist = {}
+    try:
+        with open(
+            MC_AUTOSTART_CONFIG["server_dir"] + "whitelist.json", "r"
+        ) as whitelist_file:
+            whitelist = json.load(whitelist_file)
+    except FileNotFoundError:
+        logger.error(
+            "couldn't find whitelist.json, ignoring it - if respect_whitelist is enabled no user will be able to join!"
+        )
+    return whitelist
+
+
+def sanity_check():
+    """Rudimentary check if the given configuration and server.properties can be used."""
+    if not "auto_shutdown" in MC_AUTOSTART_CONFIG:
+        MC_AUTOSTART_CONFIG["auto_shutdown"] = False
+
+    if "discord_webhook_notification" in MC_AUTOSTART_CONFIG:
+        if (
+            MC_AUTOSTART_CONFIG["discord_webhook_notification"]
+            and MC_AUTOSTART_CONFIG["discord_webhook_url"] == ""
+        ):
+            logger.error(
+                "discord_webhook_url is empty, won't send wbhook notifications"
+            )
+            MC_AUTOSTART_CONFIG["discord_webhook_notification"] = False
+    else:
+        MC_AUTOSTART_CONFIG["discord_webhook_notification"] = False
+    if "auto_shutdown_via_sigterm" in MC_AUTOSTART_CONFIG:
+        if sys.platform == "win32" and MC_AUTOSTART_CONFIG["auto_shutdown_via_sigterm"]:
+            logger.warning("auto_shutdown_via_sigterm may or may not work")
+
+
+def send_discord_notification(message: str):
+    """Sends a post request to the discord webbhook. Returns if discord notifications are set to False
 
     Args:
-        config (dict): mc_autostart.json config
-        properties (dict): server.properties config
-
-    Raises:
-        TypeError: port in mc_autostart.json isn't a string
-        Exception: both programms use the same port
-        ValueError: shutdown_through_rcon is enabled in mc_autostart.json but rcon is disabled in server.properties
-        KeyError: if shutdown_through_rcon is enabled but rcon.port or rcon.password are missing from server.properties
-        ValueError: if shutdown_through_rcon is enabled but rcon.port or rcon.password have no value
+        message (str): message to send, if longer then 200 characters, will be shortend.
     """
-    if not isinstance(config["autostart_port"], str):
-        logger.critical(
-            "stopping mc_autostart! mc_autostart port must be given as a string!"
-        )
-        raise TypeError("mc_autostart port must be given as a string!")
+    if MC_AUTOSTART_CONFIG["discord_webhook_notification"] == False:
+        return
+    if len(message) >= 200:
+        message = message[:195] + "..."
 
-    #! ignore until proxy function with out shutdown is implemented
-    # if config["autostart_port"] == properties["server-port"]:
-    #     logger.critical(
-    #         f"stopping mc_autostart! Minecraft Server Port {properties["server-port"]} MUST be different to mc_autostart port {config["autostart_port"]}."
-    #     )
-    #     raise Exception("ports must be different!")
-
-    if "shutdown_through_rcon" in config:
-        if (
-            config["shutdown_through_rcon"]
-            and properties["enable-rcon"].lower() == "false"
-        ):
-            logger.critical(
-                "stopping mc_autostart! shutdown_through_rcon is enabled, however rcon of minecraft server is disabled! Check server.properties"
-            )
-            raise ValueError(
-                "rcon is enabled in mc_autostart but rcon is disabled in server.properties"
-            )
-
-        if (
-            config["shutdown_through_rcon"]
-            and properties["enable-rcon"].lower() == "true"
-        ):
-            if "rcon.port" not in properties or "rcon.password" not in properties:
-                logger.critical(
-                    "stopping mc_autostart! shutdown_through_rcon is enabled, however rcon.port or rcon.password are missing from server.properties"
-                )
-                raise KeyError(
-                    "rcon.port or rcon.password missing from server.properties"
-                )
-            elif properties["rcon.port"] == "" or properties["rcon.password"] == "":
-                logger.critical(
-                    "stopping mc_autostart! rcon.port or rcon.password have no values set in server.properties"
-                )
-                raise ValueError("rcon.port or rcon.password have no value")
+    conn = http.client.HTTPSConnection("www.discord.com")
+    headers = {"Content-type": "application/json"}
+    body = {"content": message, "embeds": []}
+    json_data = json.dumps(body)
+    conn.request("POST", MC_AUTOSTART_CONFIG["discord_webhook_url"], json_data, headers)
+    response = conn.getresponse()
+    logger.info(f"send discord notification with return code: {response.getcode()}")
 
 
 def read_varint(conn: socket) -> tuple[int, int]:
@@ -217,9 +226,9 @@ def read_string_bytes(data: bytes) -> tuple[str, int]:
     """
     string_len, i = read_varint_bytes(data)
     try:
-        ret_string = str(data[i : string_len + 1], "utf-8")
+        ret_string = str(data[i : i + string_len], "utf-8")
     except Exception as e:
-        logger.error(f"couldn't parse string '{data[i:string_len+1]}' - skipping it")
+        logger.error(f"couldn't parse string '{data[i:i + string_len]}' - skipping it")
         ret_string = ""
     return ret_string, string_len + i
 
@@ -241,7 +250,7 @@ def parse_packet(conn: socket) -> tuple[int, int, bytes]:
     if packet_length == 0xFE and len_packet_length == 2:
         # len_packet_length value of 2 is because of the way varints are parsed
         # https://wiki.vg/Server_List_Ping#1.6
-        logger.error("received legacy ping")
+        logger.warning("received legacy ping - ignoring it")
         raise ValueError("not supported operation: legacy ping for version 1.6")
     packet_id, len_packet_id = read_varint(conn)
     if packet_length - len_packet_id == 0:
@@ -307,6 +316,30 @@ def encode_varint(value: int) -> bytes:
     return bytes(out)
 
 
+def encode_unsigned_short(value: int) -> bytes:
+    """encoded an int as a unsigned short
+
+    Args:
+        value (int): value to encode
+
+    Returns:
+        bytes: bytes object of the short
+    """
+    return int.to_bytes(value, 2, "big", signed=False)
+
+
+def add_length_field(data: bytes) -> bytes:
+    """Adds the length field in front of the bytes object, useful for encoded strings and finished packets
+
+    Args:
+        data (bytes): data to add the length field to
+
+    Returns:
+        bytes: data starting with the length of the data as a varint
+    """
+    return encode_varint(len(data)) + data
+
+
 def create_kick_packet(message: str = None) -> bytes:
     """creates the kick packet to be send to the client
 
@@ -326,6 +359,36 @@ def create_kick_packet(message: str = None) -> bytes:
 
     packet_length = encode_varint(len(packet_data))
     return packet_length + packet_data
+
+
+def ping_mc_server() -> dict:
+    """Ping the local mc server to check if it's online
+
+    Returns:
+        dict: {} if the server isn't available or the ping response if it's available
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as conn:
+        conn.settimeout(5)
+        try:
+            conn.connect(("localhost", int(SERVER_PROPERTIES["server-port"])))
+            # Handshake: Packet ID 0x00 - Protocol Version 0x00 - host - port - next_state 0x01
+            conn.send(
+                add_length_field(
+                    b"\x00\x00"
+                    + add_length_field("localhost".encode("utf8"))
+                    + encode_unsigned_short(int(SERVER_PROPERTIES["server-port"]))
+                    + b"\x01"
+                )
+            )
+            # Ping Request 0x00
+            conn.send(add_length_field(b"\x00"))
+            # Read response
+            _, _, packet_data = parse_packet(conn)
+            response, _ = read_string_bytes(packet_data)
+        except Exception as e:
+            logger.warning(f"mc server unavailable, ping failed - {e}")
+            response = "{}"
+    return json.loads(response)
 
 
 def handle_server_list_ping(conn: socket):
@@ -397,14 +460,20 @@ def handle_player_join(conn: socket):
             return
 
     conn.sendall(create_kick_packet())
+    send_discord_notification(f"Player {player_name} is waking up the server")
     logger.info(f"starting minecraft server...")
     global server_started
     server_started = True
 
 
-def start_listening():
-    """Listen to player connections, handle ping and login request and start server if player joins."""
-    addr = ("", int(MC_AUTOSTART_CONFIG["autostart_port"]))
+def start_listening() -> any:
+    """Listen to player connections, handle ping and login request and start server if player joins.
+
+
+    Returns:
+        any: The created subprocess of the server
+    """
+    addr = ("", int(SERVER_PROPERTIES["server-port"]))
     if socket.has_dualstack_ipv6():
         dual_stack = True
         family = socket.AF_INET6
@@ -419,13 +488,15 @@ def start_listening():
     with socket.create_server(
         (addr), family=family, dualstack_ipv6=dual_stack, reuse_port=False, backlog=5
     ) as server:
+        send_discord_notification("Server is sleeping and waiting for connections")
         logger.info(f"server is listening on port {addr[1]}...")
         while True:
             conn, client_addr = server.accept()
+            conn.settimeout(10)
             logger.info(f"new connection from {client_addr}")
             try:
                 # expecting handshake with id 0x00
-                packet_length, packet_id, data = parse_packet(conn)
+                _, packet_id, data = parse_packet(conn)
                 if packet_id != 0x00:
                     logger.warning(
                         f"expected handshake (0x00) but got packet id {hex(packet_id)} - closing connection!"
@@ -461,23 +532,172 @@ def start_listening():
             conn.close()
             logger.info(f"connection closed with {client_addr}")
     logger.info("mc_autostart socket closed")
-    p = subprocess.Popen(MC_AUTOSTART_CONFIG["server_start_command"], shell=True)
-    logger.info(f"start command send, PID of server: {p.pid} - stopping mc_autostart")
+    try:
+        p = subprocess.Popen(
+            MC_AUTOSTART_CONFIG["server_start_command"].split(" "),
+            shell=False,
+            cwd=MC_AUTOSTART_CONFIG["server_dir"],
+            stdin=subprocess.PIPE,
+            text=True,
+            bufsize=0,
+            start_new_session=True,
+        )
+    except Exception as e:
+        logger.critical(
+            f"couldn't execute server_start_command {MC_AUTOSTART_CONFIG['server_start_command']} - {e}!"
+        )
+        send_discord_notification(f"Failed to start minecraft server, check your logs!")
+        raise Exception("CAN'T RECOVER SEE LOGS - GOOD BYE")
+    return p
+
+
+def wait_for_server() -> int:
+    """Waits for the server to start, if the server is to slow (isn't available after start_timeout seconds) the server process is killed
+
+    Returns:
+        int: 0 on success, -1 if the timeout is exceeded
+    """
+    start_time = time.time()
+    while True:
+        # ping the server every ten seconds and check if the timeout is over / the server is available
+        mc_status = ping_mc_server()
+        if "players" in mc_status:
+            return 0
+        if time.time() - start_time > MC_AUTOSTART_CONFIG["start_timeout"]:
+            return -1
+        time.sleep(10)
+
+
+def watch_server():
+    """Watches the server for players and returns once the server should be shutdown"""
+    start_time = time.time()
+    last_online_time = 0
+    while True:
+        ping = ping_mc_server()
+        if "players" not in ping:
+            # server crashed
+            logger.error("the minecraft server crashed - going back to sleep")
+            send_discord_notification(
+                "⚡ Minecraft Server crashed! Going back to sleep"
+            )
+            return
+        player_number = ping["players"]["online"]
+        if player_number > 0:
+            last_online_time = time.time()
+            logger.info(f"{player_number} players on server, not shuting down")
+        else:
+            current_time = time.time()
+            logger.info(f"no players on server - checking if server should shutdown")
+            if current_time - start_time > MC_AUTOSTART_CONFIG["minimum_time_online"]:
+                # server is allowed to be shutdown
+                if current_time - last_online_time > MC_AUTOSTART_CONFIG["stop_after"]:
+                    logger.info(f"shuting down server")
+                    send_discord_notification(
+                        "🔴 No players on server, sending server to sleep"
+                    )
+                    return
+            logger.info("no timeout reached - server will stay online")
+        time.sleep(30)
+
+
+def wait_for_server_shutdown() -> int:
+    """Waits for the shutdown of the server, if the server is still running after stop_timeout.
+
+    Args:
+        server_process (any): the subprocess of the server
+
+    Returns:
+        int: 0 if the server is offline, -1 if the server is still running
+    """
+    shutdown_start = time.time()
+    while True:
+        if server_process.poll() is not None:
+            # Server is gone
+            return 0
+        if time.time() - shutdown_start > MC_AUTOSTART_CONFIG["stop_timeout"]:
+            # timeout exceted kill server
+            return -1
+        time.sleep(5)
+
+
+def kill_server(server_process: any):
+    logger.info("force kill stage 1: sending taskkill or sigterm to every child")
+    if sys.platform == "win32":
+        subprocess.call(
+            ["taskkill", "/F", "/T", "/PID", str(server_process.pid)]
+        )  # No world save
+    else:
+        # Not tested on mac
+        os.killpg(os.getpgid(server_process.pid), signal.SIGTERM)  # may save the world
+    logger.info(
+        "force kill stage 2: check if force kill worked (taskkill will be successful, sigterm may not)"
+    )
+    time.sleep(15)
+    if server_process.poll() is None or ping_mc_server() != {}:
+        if sys.platform != "win32":
+            logger.critical(
+                "the server is still running, after sending SIGTERM/taskkill - killing it with SIGKILL"
+            )
+            os.killpg(os.getpgid(server_process.pid), signal.SIGKILL)
+        else:
+            logger.critical("windows failed to kill the server")
+    else:
+        logger.info("the server was killed")
+    time.sleep(2)
+    global server_started
+    server_started = False
+
 
 if __name__ == "__main__":
     logger.info("started mc_autostart")
-    config = load_config()
-    properties = load_properties()
+    MC_AUTOSTART_CONFIG = load_config()
+    SERVER_PROPERTIES = load_properties()
+    sanity_check()
+    WHITELIST = load_whitelist()
 
-    sanity_check(config, properties)
+    if MC_AUTOSTART_CONFIG["auto_shutdown"]:
+        while True:
+            server_process = start_listening()
+            logger.info(
+                f"server_start_command send, PID of server: {server_process.pid} - watching server"
+            )
 
-    # script didn't crash so config should be safe to use
-    MC_AUTOSTART_CONFIG = config
-    SERVER_PROPERTIES = properties
-    try:
-        with open("whitelist.json", "r") as whitelist_file:
-            WHITELIST = json.load(whitelist_file)
-    except FileNotFoundError:
-        logger.error("couldn't find whitelist.json, ignoring it - if respect_whitelist is enabled no user will be able to join!")
+            # Server is starting check if it's available
+            status = wait_for_server()
+            if status == -1:
+                logger.critical(
+                    "the server exceeded the start_timeout - killing the process and entering sleep mode"
+                )
+                send_discord_notification(
+                    "Minecraft Server failed to start, going back to sleep"
+                )
+                kill_server(server_process)
+                continue
 
-    start_listening()
+            else:
+                logger.info("mc server started successfully")
+                send_discord_notification("🟢 Minecraft Server is running!")
+                # wait until no more players are on the server
+                watch_server()
+                # server should shutdown wait for it
+
+                if MC_AUTOSTART_CONFIG["auto_shutdown_via_sigterm"]:
+                    server_process.terminate()
+                else:
+                    server_process.stdin.write(f"stop\n")
+                shutdown_status = wait_for_server_shutdown()
+                if shutdown_status == -1:
+                    logger.error("server failed to shutdown - killing server")
+                    send_discord_notification("server failed to shutdown")
+                    kill_server(server_process)
+                else:
+                    logger.info("server successfully shutdown")
+
+    else:
+        server_process = start_listening()
+        logger.info(
+            f"server_start_command send, PID of server: {server_process.pid} - stopping mc_autostart"
+        )
+        send_discord_notification(
+            "stopping mc_autostart because auto_shutdown is disabled"
+        )
