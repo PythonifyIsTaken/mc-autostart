@@ -64,10 +64,11 @@ Basic script to launch your minecraft server when someone tries to join.
     }
 
     ```
-    > [!IMPORTANT]
-    > Place mc_autostart.py and mc_autostart.json need to be in the same folder!.
+    
+> [!IMPORTANT]
+> mc_autostart.py and mc_autostart.json need to be in the same folder!.
 
-2. If you use docker for your server, use auto_shutdown_via_sigterm: true and a custom start script that catches the SIGTERM signal to stop the server. This way you can stop the mc server before the host system shutsdown.
+2. If you use docker for your server, use `auto_shutdown_via_sigterm: true` and a custom script that catches the SIGTERM signal to stop the server. This way you can stop the mc server before the host system shutsdown.
 
 3. Start the server:
     ### On windows:
